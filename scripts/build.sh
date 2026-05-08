@@ -79,24 +79,40 @@ if [ "$INSTALL" = true ]; then
     cp -r "$APP_DIR" /Applications/
 fi
 
-# Create DMG for distribution
-DMG_DIR="$ROOT/dist/dmg-staging"
+# Create styled DMG for distribution
 DMG_PATH="$ROOT/dist/${APP_NAME}.dmg"
+DMG_BG="$ROOT/scripts/dmg-background.png"
 
 echo "Creating DMG..."
-rm -rf "$DMG_DIR" "$DMG_PATH"
-mkdir -p "$DMG_DIR"
-cp -r "$APP_DIR" "$DMG_DIR/"
-# Add a symlink to /Applications for drag-to-install
-ln -s /Applications "$DMG_DIR/Applications"
+rm -f "$DMG_PATH"
 
-hdiutil create -volname "$APP_NAME" \
-    -srcfolder "$DMG_DIR" \
-    -ov -format UDZO \
-    "$DMG_PATH" \
-    -quiet
-
-rm -rf "$DMG_DIR"
+if command -v create-dmg &>/dev/null; then
+    create-dmg \
+        --volname "$APP_NAME" \
+        --background "$DMG_BG" \
+        --window-pos 200 120 \
+        --window-size 660 400 \
+        --icon-size 128 \
+        --icon "$APP_NAME.app" 180 170 \
+        --app-drop-link 480 170 \
+        --hide-extension "$APP_NAME.app" \
+        --no-internet-enable \
+        "$DMG_PATH" \
+        "$APP_DIR"
+else
+    echo "  create-dmg not found, falling back to plain hdiutil (brew install create-dmg for styled DMG)"
+    DMG_DIR="$ROOT/dist/dmg-staging"
+    rm -rf "$DMG_DIR"
+    mkdir -p "$DMG_DIR"
+    cp -r "$APP_DIR" "$DMG_DIR/"
+    ln -s /Applications "$DMG_DIR/Applications"
+    hdiutil create -volname "$APP_NAME" \
+        -srcfolder "$DMG_DIR" \
+        -ov -format UDZO \
+        "$DMG_PATH" \
+        -quiet
+    rm -rf "$DMG_DIR"
+fi
 
 echo ""
 echo "Done!"

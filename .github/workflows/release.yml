@@ -31,6 +31,10 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Install create-dmg
+        if: steps.version.outputs.skip != 'true'
+        run: brew install create-dmg
+
       - name: Build and package DMG
         if: steps.version.outputs.skip != 'true'
         run: ./scripts/build.sh --version "${{ steps.version.outputs.semver }}" --no-install
