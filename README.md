@@ -2,17 +2,24 @@
 
 Native macOS Kanban board for your GitHub PRs. Built with SwiftUI, powered by the `gh` CLI.
 
-## Requirements
+## Install
+
+Download `PsyDuck.dmg` from the [latest release](https://github.com/casassg/psyduck/releases/latest) and drag to `/Applications`.
+
+### Requirements
 
 - macOS 15+.
 - [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated.
-- Swift 6+ to build from source.
 
-## Install
+### Build from source
+
+Requires Swift 6+ (comes with Xcode). CLI tools (`svu`) are managed by [Hermit](https://github.com/cashapp/hermit) in `bin/` — no extra installs needed.
 
 ```bash
-./scripts/build.sh   # builds, installs to /Applications, creates dist/PsyDuck.dmg
-./scripts/dev.sh     # run in debug mode
+./scripts/build.sh                    # release build, install to /Applications, create DMG
+./scripts/build.sh --version 1.2.3    # inject version into Info.plist
+./scripts/build.sh --no-install       # skip /Applications copy (used in CI)
+./scripts/dev.sh                      # run in debug mode
 ```
 
 ## Columns

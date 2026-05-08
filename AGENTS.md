@@ -7,6 +7,7 @@ Native macOS SwiftUI app. Kanban board for GitHub PRs with local worktree tracki
 - Swift 6 / SwiftUI, macOS 15+.
 - Swift Package Manager, single executable target.
 - No external dependencies. Uses `gh` CLI and `git` via `Process`.
+- [Hermit](https://github.com/cashapp/hermit) manages CLI tools in `bin/`. Prefer Hermit over brew/manual installs for any new tool or binary dependency. Swift/Xcode are NOT available in Hermit (system toolchain) — this is expected.
 
 ## Architecture
 
@@ -43,6 +44,15 @@ Approved = `reviewDecision == APPROVED` AND `mergeStateStatus == CLEAN` AND no f
 ## Build & Run
 
 ```
-./scripts/dev.sh      # debug
-./scripts/build.sh    # release .app bundle in dist/
+./scripts/dev.sh                              # debug
+./scripts/build.sh                            # release .app bundle in dist/, install to /Applications
+./scripts/build.sh --version 1.2.3            # inject version into Info.plist
+./scripts/build.sh --no-install               # skip /Applications copy (used in CI)
 ```
+
+## CI / Release
+
+GitHub Actions workflow (`.github/workflows/release.yml`) runs on every push to `main`.
+Uses `svu` (via Hermit) to derive the next semver from conventional commits.
+If the version bumps, it builds the DMG, tags the commit, and creates a GitHub release with `PsyDuck.dmg` attached.
+No release is created if no `feat:`/`fix:` commits landed since the last tag.

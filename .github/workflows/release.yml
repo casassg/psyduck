@@ -15,14 +15,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install svu
-        run: brew install caarlos0/tap/svu
-
       - name: Determine version
         id: version
         run: |
-          NEXT=$(svu next)
-          CURRENT=$(svu current 2>/dev/null || echo "v0.0.0")
+          NEXT=$(./bin/svu next)
+          CURRENT=$(./bin/svu current 2>/dev/null || echo "v0.0.0")
           echo "next=$NEXT" >> "$GITHUB_OUTPUT"
           # Strip v prefix for build script
           echo "semver=${NEXT#v}" >> "$GITHUB_OUTPUT"
