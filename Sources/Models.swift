@@ -85,7 +85,7 @@ enum ValidationStatus: Sendable, Equatable {
 
 // MARK: - Pull Request
 
-struct PullRequest: Identifiable, Equatable, Sendable {
+struct PullRequest: Identifiable, Equatable, Sendable, Codable {
     let id: String
     let number: Int
     let title: String
@@ -159,7 +159,7 @@ struct PullRequest: Identifiable, Equatable, Sendable {
 
 // MARK: - Worktree
 
-struct Worktree: Sendable, Equatable {
+struct Worktree: Sendable, Equatable, Codable {
     let path: String
     let mainRepoPath: String
     let branch: String

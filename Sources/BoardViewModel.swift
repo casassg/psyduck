@@ -32,6 +32,7 @@ final class BoardViewModel {
 
     private let ghService = GitHubService()
     private let wtService = WorktreeService()
+    private let cacheService = CacheService()
     private var worktreeMap: [WorktreeService.WorktreeKey: Worktree] = [:]
     private var refreshTimer: Timer?
 
@@ -43,6 +44,11 @@ final class BoardViewModel {
             UserDefaults.standard.stringArray(forKey: Self.trackedFoldersKey) ?? []
         // Detect installed apps once at launch
         availableApps = OpenInApp.detectInstalled()
+        // Load cached PRs for instant display on launch
+        if let cached = cacheService.load() {
+            pullRequests = cached.pullRequests
+            lastRefresh = cached.lastRefresh
+        }
     }
 
     // MARK: - Computed (filtered)
@@ -130,6 +136,9 @@ final class BoardViewModel {
 
             self.pullRequests = prs
             self.lastRefresh = Date()
+
+            // Persist to disk cache for instant launch next time
+            cacheService.save(pullRequests: prs, lastRefresh: lastRefresh!)
 
             // Clear stale filters
             if let org = selectedOrg, !organizations.contains(org) {
