@@ -149,6 +149,7 @@ final class BoardViewModel {
         setupStatus = status
         guard status == .ok else { return }
         isLoading = true
+        defer { isLoading = false }
         errorMessage = nil
 
         async let wtTask = wtService.scanWorktrees(trackedFolders: trackedFolders)
@@ -182,8 +183,6 @@ final class BoardViewModel {
         // Clear stale filters
         selectedOrgs = selectedOrgs.filter { organizations.contains($0) }
         selectedRepos = selectedRepos.filter { repositories.contains($0) }
-
-        isLoading = false
     }
 
     // MARK: - PR Actions
@@ -269,13 +268,16 @@ final class BoardViewModel {
 
     func startAutoRefresh() {
         stopAutoRefresh()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) {
+        let timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) {
             [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 await self.refresh()
             }
         }
+        // .common mode ensures the timer fires even during scrolling or menu interaction
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
     }
 
     func stopAutoRefresh() {

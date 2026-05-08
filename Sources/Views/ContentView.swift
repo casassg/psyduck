@@ -290,10 +290,13 @@ struct ContentView: View {
 
     private var refreshArea: some View {
         HStack(spacing: 10) {
-            if !viewModel.lastRefreshText.isEmpty {
-                Text(viewModel.lastRefreshText)
-                    .font(Theme.metaFont)
-                    .foregroundStyle(Theme.textTertiary)
+            // TimelineView re-renders every 30s so "Updated X ago" stays fresh
+            TimelineView(.periodic(from: .now, by: 30)) { _ in
+                if !viewModel.lastRefreshText.isEmpty {
+                    Text(viewModel.lastRefreshText)
+                        .font(Theme.metaFont)
+                        .foregroundStyle(Theme.textTertiary)
+                }
             }
 
             Button {
