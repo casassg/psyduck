@@ -14,6 +14,32 @@ final class GitHubService: Sendable {
         self.ghPath = knownPaths.first { FileManager.default.fileExists(atPath: $0) } ?? "gh"
     }
 
+    // MARK: - Setup Check
+
+    /// Returns .ok, .ghNotInstalled, or .ghNotAuthenticated.
+    func checkSetup() -> BoardViewModel.SetupStatus {
+        // Check if gh binary exists
+        guard FileManager.default.fileExists(atPath: ghPath) else {
+            return .ghNotInstalled
+        }
+
+        // Check if gh is authenticated: `gh auth status` exits 0 when logged in
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ghPath)
+        process.arguments = ["auth", "status"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.environment = Self.defaultEnv
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0 ? .ok : .ghNotAuthenticated
+        } catch {
+            return .ghNotInstalled
+        }
+    }
+
     // MARK: - Public API
 
     /// Fetch all PRs for the board: open + recently merged, then enrich ALL with `gh pr view`.
@@ -60,6 +86,14 @@ final class GitHubService: Sendable {
             "--repo", repo,
             strategy.ghFlag,
             "--delete-branch",
+        ])
+    }
+
+    /// Mark a draft PR as ready for review.
+    func publishPR(repo: String, number: Int) async throws {
+        try await runGHVoid([
+            "pr", "ready", String(number),
+            "--repo", repo,
         ])
     }
 

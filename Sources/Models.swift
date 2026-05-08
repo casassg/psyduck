@@ -4,8 +4,8 @@ import SwiftUI
 
 enum KanbanColumn: String, CaseIterable, Identifiable {
     case draft = "Draft"
-    case inReview = "In Review"
     case validation = "Validation"
+    case inReview = "Waiting for Review"
     case approved = "Approved"
     case merged = "Merged"
 
@@ -34,7 +34,7 @@ enum KanbanColumn: String, CaseIterable, Identifiable {
     var emptyMessage: String {
         switch self {
         case .draft: "No draft PRs"
-        case .inReview: "No PRs in review"
+        case .inReview: "No PRs waiting for review"
         case .validation: "No CI issues"
         case .approved: "No approved PRs"
         case .merged: "No recent merges"
@@ -271,6 +271,7 @@ struct OpenInApp: Identifiable, Sendable {
 enum PRAction: Identifiable {
     case merge(pr: PullRequest, strategy: MergeStrategy)
     case close(pr: PullRequest)
+    case publish(pr: PullRequest)
     case updateBranch(pr: PullRequest)
     case deleteWorktree(pr: PullRequest, force: Bool = false)
 
@@ -278,6 +279,7 @@ enum PRAction: Identifiable {
         switch self {
         case .merge(let pr, _): "merge-\(pr.id)"
         case .close(let pr): "close-\(pr.id)"
+        case .publish(let pr): "publish-\(pr.id)"
         case .updateBranch(let pr): "update-\(pr.id)"
         case .deleteWorktree(let pr, _): "delete-wt-\(pr.id)"
         }

@@ -46,6 +46,7 @@ struct ColumnView: View {
                                     viewModel.confirmMerge(pr, strategy: strategy)
                                 },
                                 onClose: { viewModel.confirmClose(pr) },
+                                onPublish: { viewModel.confirmPublish(pr) },
                                 onUpdateBranch: { viewModel.confirmUpdateBranch(pr) },
                                 onDeleteWorktree: { viewModel.confirmDeleteWorktree(pr) }
                             )

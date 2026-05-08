@@ -6,10 +6,12 @@ struct PRCard: View {
     let availableApps: [OpenInApp]
     let onMerge: (MergeStrategy) -> Void
     let onClose: () -> Void
+    let onPublish: () -> Void
     let onUpdateBranch: () -> Void
     let onDeleteWorktree: () -> Void
 
     @State private var isHovered = false
+    @State private var copied = false
 
     private var isOpen: Bool {
         pr.column != .merged
@@ -19,7 +21,6 @@ struct PRCard: View {
         ZStack(alignment: .topTrailing) {
             cardContent
 
-            // X close button — top-right corner, only on open PRs
             if isOpen && isHovered {
                 Button { onClose() } label: {
                     Image(systemName: "xmark")
@@ -67,7 +68,7 @@ struct PRCard: View {
 
             Spacer().frame(height: 2)
 
-            // PR number + branch
+            // PR number + branch + copy link
             HStack(spacing: 6) {
                 Text("#\(pr.number)")
                     .font(Theme.metaMonoFont)
@@ -80,6 +81,27 @@ struct PRCard: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+
+                Spacer()
+
+                // Copy link button
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(pr.url, forType: .string)
+                    copied = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.5))
+                        copied = false
+                    }
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "link")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(copied ? Theme.approvedAccent : Theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .pointingHand()
+                .help("Copy PR link")
+                .animation(.snappy(duration: 0.15), value: copied)
             }
 
             // Validation status badge (only in Validation column)
@@ -161,9 +183,10 @@ struct PRCard: View {
         let hasWorktree = pr.worktree != nil
         let canDeleteWorktree = hasWorktree && !(pr.worktree?.isMain ?? true)
         let showMerge = column == .approved
+        let showPublish = column == .draft
         let showUpdate = column == .validation && pr.validationStatus == .behind
         let showDelete = column == .merged && canDeleteWorktree
-        let showActions = hasWorktree || showMerge || showUpdate || showDelete
+        let showActions = hasWorktree || showMerge || showPublish || showUpdate || showDelete
 
         if showActions {
             Divider().opacity(0.1).padding(.vertical, 2)
@@ -173,6 +196,10 @@ struct PRCard: View {
 
                 if hasWorktree {
                     openButton
+                }
+
+                if showPublish {
+                    publishButton
                 }
 
                 if showUpdate {
@@ -217,6 +244,25 @@ struct PRCard: View {
             .padding(.vertical, 5)
             .background(Theme.surfaceBackground, in: Capsule())
             .overlay(Capsule().stroke(Theme.cardBorder, lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+        .pointingHand()
+    }
+
+    // MARK: - Publish Button
+
+    private var publishButton: some View {
+        Button { onPublish() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.up.circle")
+                    .font(.system(size: 10))
+                Text("Ready for Review")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Theme.validationAccent.opacity(0.8), in: Capsule())
         }
         .buttonStyle(.plain)
         .pointingHand()

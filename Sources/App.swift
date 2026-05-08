@@ -1,9 +1,9 @@
 import SwiftUI
 
 @main
-struct GHPRsApp: App {
+struct PsyDuckApp: App {
     var body: some Scene {
-        WindowGroup("Pull Requests") {
+        WindowGroup("PsyDuck") {
             ContentView()
                 .preferredColorScheme(.dark)
         }

@@ -7,7 +7,11 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "gh-prs",
-            path: "Sources"
+            path: "Sources",
+            exclude: ["Resources/AppIcon.icns"],
+            resources: [
+                .copy("Resources/logo.png"),
+            ]
         ),
     ]
 )

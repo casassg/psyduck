@@ -20,7 +20,7 @@ enum Theme {
 
     static let draftAccent = Color(hex: 0x8E8E93)
     static let inReviewAccent = Color(hex: 0xFF9F0A)
-    static let validationAccent = Color(hex: 0xFF9F0A)
+    static let validationAccent = Color(hex: 0x0A84FF)
     static let approvedAccent = Color(hex: 0x30D158)
     static let mergedAccent = Color(hex: 0xBF5AF2)
 

@@ -6,7 +6,7 @@ struct CacheService: Sendable {
 
     private static let cacheDir: URL = {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        return base.appendingPathComponent("com.gerardc.gh-prs", isDirectory: true)
+        return base.appendingPathComponent("com.gerardc.psyduck", isDirectory: true)
     }()
 
     private static let prsFile = cacheDir.appendingPathComponent("pullRequests.json")
@@ -39,20 +39,13 @@ struct CacheService: Sendable {
     // MARK: - Save (called after each successful refresh)
 
     func save(pullRequests: [PullRequest], lastRefresh: Date) {
-        // Strip worktree data — it's re-scanned fresh each launch
-        let stripped = pullRequests.map { pr -> PullRequest in
-            var copy = pr
-            copy.worktree = nil
-            return copy
-        }
-
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
 
         do {
             try FileManager.default.createDirectory(
                 at: Self.cacheDir, withIntermediateDirectories: true)
-            let prsData = try encoder.encode(stripped)
+            let prsData = try encoder.encode(pullRequests)
             try prsData.write(to: Self.prsFile, options: .atomic)
             let metaData = try encoder.encode(CacheMeta(lastRefresh: lastRefresh))
             try metaData.write(to: Self.metaFile, options: .atomic)

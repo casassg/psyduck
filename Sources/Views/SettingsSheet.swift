@@ -29,7 +29,7 @@ struct SettingsSheet: View {
 
             // Description
             Text(
-                "Add folders that contain your git repositories (e.g. ~/Development). The app will scan them for worktrees and match them to your PRs."
+                "Add folders that contain your main git checkouts (e.g. ~/Development). All worktrees are discovered automatically — you don't need to add worktree folders separately."
             )
             .font(Theme.metaFont)
             .foregroundStyle(Theme.textSecondary)

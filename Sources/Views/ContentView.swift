@@ -11,7 +11,9 @@ struct ContentView: View {
                 toolbarArea
                 Divider().opacity(0.15)
 
-                if viewModel.isLoading && viewModel.pullRequests.isEmpty {
+                if viewModel.setupStatus != .ok {
+                    setupErrorView
+                } else if viewModel.isLoading && viewModel.pullRequests.isEmpty {
                     loadingView
                 } else if let error = viewModel.errorMessage, viewModel.pullRequests.isEmpty {
                     errorView(error)
@@ -32,13 +34,6 @@ struct ContentView: View {
                 .keyboardShortcut("r", modifiers: .command)
                 .hidden()
         }
-        .onChange(of: viewModel.selectedOrg) {
-            if let repo = viewModel.selectedRepo,
-                !viewModel.repositories.contains(repo)
-            {
-                viewModel.selectedRepo = nil
-            }
-        }
         .task {
             await viewModel.refresh()
             viewModel.startAutoRefresh()
@@ -49,19 +44,16 @@ struct ContentView: View {
         .sheet(isPresented: $viewModel.showSettings) {
             SettingsSheet(viewModel: viewModel)
         }
-        // Confirmation dialog for merge/close/delete
         .alert(
             confirmationTitle,
             isPresented: showConfirmation,
             actions: { confirmationActions },
             message: { Text(confirmationMessage) }
         )
-        // Error alert after failed action
         .alert(
             "Action Failed",
             isPresented: showActionError,
             actions: {
-                // If this is a force-delete prompt, show force option
                 if let action = viewModel.pendingAction, case .deleteWorktree = action {
                     Button("Force Delete", role: .destructive) {
                         Task { await viewModel.executeAction(action) }
@@ -83,8 +75,6 @@ struct ContentView: View {
     private var showConfirmation: Binding<Bool> {
         Binding(
             get: { viewModel.pendingAction != nil && viewModel.actionError == nil },
-            // Safe to clear here — button closures capture the action synchronously
-            // before this setter fires, so executeAction() uses the captured copy.
             set: { if !$0 { viewModel.pendingAction = nil } }
         )
     }
@@ -101,6 +91,7 @@ struct ContentView: View {
         switch action {
         case .merge: return "Merge Pull Request?"
         case .close: return "Close Pull Request?"
+        case .publish: return "Ready for Review?"
         case .updateBranch: return "Update Branch?"
         case .deleteWorktree: return "Delete Worktree?"
         }
@@ -113,6 +104,8 @@ struct ContentView: View {
             return "\(strategy.rawValue) #\(pr.number) into base branch.\nThe remote branch will be deleted."
         case .close(let pr):
             return "Close #\(pr.number) (\(pr.title)).\nThe remote branch will be deleted."
+        case .publish(let pr):
+            return "Mark #\(pr.number) (\(pr.title)) as ready for review."
         case .updateBranch(let pr):
             return "Rebase #\(pr.number) on top of the latest base branch."
         case .deleteWorktree(let pr, let force):
@@ -125,8 +118,6 @@ struct ContentView: View {
     @ViewBuilder
     private var confirmationActions: some View {
         if let action = viewModel.pendingAction {
-            // Capture action synchronously — by the time the Task body runs,
-            // the alert dismiss may have already cleared pendingAction.
             switch action {
             case .merge:
                 Button("Merge", role: .destructive) {
@@ -134,6 +125,10 @@ struct ContentView: View {
                 }
             case .close:
                 Button("Close PR", role: .destructive) {
+                    Task { await viewModel.executeAction(action) }
+                }
+            case .publish:
+                Button("Publish") {
                     Task { await viewModel.executeAction(action) }
                 }
             case .updateBranch:
@@ -153,9 +148,20 @@ struct ContentView: View {
 
     private var toolbarArea: some View {
         HStack(spacing: 16) {
-            Text("Pull Requests")
-                .font(Theme.toolbarTitleFont)
-                .foregroundStyle(Theme.textPrimary)
+            HStack(spacing: 8) {
+                if let logoURL = Bundle.module.url(forResource: "logo", withExtension: "png"),
+                    let nsImage = NSImage(contentsOf: logoURL)
+                {
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(height: 22)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                Text("PsyDuck")
+                    .font(Theme.toolbarTitleFont)
+                    .foregroundStyle(Theme.textPrimary)
+            }
 
             Spacer()
 
@@ -165,7 +171,6 @@ struct ContentView: View {
 
             refreshArea
 
-            // Settings gear
             Button { viewModel.showSettings = true } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 13, weight: .medium))
@@ -183,26 +188,30 @@ struct ContentView: View {
         .background(Theme.windowBackground)
     }
 
+    // MARK: - Multi-Select Filters
+
     @ViewBuilder
     private var filterGroup: some View {
         HStack(spacing: 8) {
-            filterPicker(
+            multiFilterPicker(
                 title: "Organization",
-                selection: $viewModel.selectedOrg,
+                selected: viewModel.selectedOrgs,
                 options: viewModel.organizations,
-                displayName: { $0 }
+                displayName: { $0 },
+                toggle: { viewModel.toggleOrg($0) }
             )
 
-            filterPicker(
+            multiFilterPicker(
                 title: "Repository",
-                selection: $viewModel.selectedRepo,
+                selected: viewModel.selectedRepos,
                 options: viewModel.repositories,
                 displayName: { name in
-                    if viewModel.selectedOrg != nil {
+                    if !viewModel.selectedOrgs.isEmpty {
                         return name.split(separator: "/").last.map(String.init) ?? name
                     }
                     return name
-                }
+                },
+                toggle: { viewModel.toggleRepo($0) }
             )
 
             if viewModel.hasActiveFilters {
@@ -222,32 +231,49 @@ struct ContentView: View {
         }
     }
 
-    private func filterPicker(
+    private func multiFilterPicker(
         title: String,
-        selection: Binding<String?>,
+        selected: Set<String>,
         options: [String],
-        displayName: @escaping (String) -> String
+        displayName: @escaping (String) -> String,
+        toggle: @escaping (String) -> Void
     ) -> some View {
-        Menu {
-            Button("All \(title)s") {
-                withAnimation(.snappy(duration: 0.25)) {
-                    selection.wrappedValue = nil
-                }
-            }
-            Divider()
-            ForEach(options, id: \.self) { option in
-                Button(displayName(option)) {
+        let pillLabel: String = {
+            if selected.isEmpty { return "All \(title)s" }
+            if selected.count == 1 { return displayName(selected.first!) }
+            return "\(selected.count) \(title)s"
+        }()
+
+        return Menu {
+            if !selected.isEmpty {
+                Button("Clear \(title)s") {
                     withAnimation(.snappy(duration: 0.25)) {
-                        selection.wrappedValue = option
+                        for item in selected { toggle(item) }
+                    }
+                }
+                Divider()
+            }
+            ForEach(options, id: \.self) { option in
+                Button {
+                    withAnimation(.snappy(duration: 0.25)) {
+                        toggle(option)
+                    }
+                } label: {
+                    HStack {
+                        Text(displayName(option))
+                        Spacer()
+                        if selected.contains(option) {
+                            Image(systemName: "checkmark")
+                        }
                     }
                 }
             }
         } label: {
             HStack(spacing: 6) {
-                Text(selection.wrappedValue.map(displayName) ?? "All \(title)s")
+                Text(pillLabel)
                     .font(Theme.filterFont)
                     .foregroundStyle(
-                        selection.wrappedValue != nil ? Theme.textPrimary : Theme.textSecondary
+                        selected.isEmpty ? Theme.textSecondary : Theme.textPrimary
                     )
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
@@ -296,6 +322,77 @@ struct ContentView: View {
     }
 
     // MARK: - States
+
+    private var setupErrorView: some View {
+        VStack(spacing: 16) {
+            Spacer()
+
+            if let logoURL = Bundle.module.url(forResource: "logo", withExtension: "png"),
+                let nsImage = NSImage(contentsOf: logoURL)
+            {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: 64)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+
+            if viewModel.setupStatus == .ghNotInstalled {
+                Text("GitHub CLI not found")
+                    .font(Theme.toolbarTitleFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Text("PsyDuck requires the **gh** CLI to fetch your pull requests.")
+                    .font(Theme.filterFont)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 400)
+                Text("Install it with Homebrew:")
+                    .font(Theme.metaFont)
+                    .foregroundStyle(Theme.textTertiary)
+                Text("brew install gh")
+                    .font(Theme.metaMonoFont)
+                    .foregroundStyle(Theme.inReviewAccent)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Theme.surfaceBackground, in: RoundedRectangle(cornerRadius: 8))
+                Button("Open cli.github.com") {
+                    NSWorkspace.shared.open(URL(string: "https://cli.github.com/")!)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.validationAccent)
+                .pointingHand()
+            } else {
+                Text("GitHub CLI not authenticated")
+                    .font(Theme.toolbarTitleFont)
+                    .foregroundStyle(Theme.textPrimary)
+                Text("PsyDuck needs **gh** to be logged in to fetch your pull requests.")
+                    .font(Theme.filterFont)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 400)
+                Text("Run this in your terminal:")
+                    .font(Theme.metaFont)
+                    .foregroundStyle(Theme.textTertiary)
+                Text("gh auth login")
+                    .font(Theme.metaMonoFont)
+                    .foregroundStyle(Theme.inReviewAccent)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Theme.surfaceBackground, in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            Button("Retry") {
+                Task { await viewModel.refresh() }
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.approvedAccent)
+            .pointingHand()
+            .padding(.top, 8)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
     private var loadingView: some View {
         VStack(spacing: 16) {

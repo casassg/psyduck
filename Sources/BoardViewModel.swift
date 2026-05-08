@@ -11,9 +11,9 @@ final class BoardViewModel {
     var errorMessage: String?
     var lastRefresh: Date?
 
-    // Filters
-    var selectedOrg: String?
-    var selectedRepo: String?
+    // Filters (multi-select: empty set = all)
+    var selectedOrgs: Set<String> = []
+    var selectedRepos: Set<String> = []
 
     // Settings
     var showSettings = false
@@ -28,6 +28,14 @@ final class BoardViewModel {
     var pendingAction: PRAction?
     var actionError: String?
 
+    // Setup errors (gh not installed or not authenticated)
+    enum SetupStatus: Equatable {
+        case ok
+        case ghNotInstalled
+        case ghNotAuthenticated
+    }
+    var setupStatus: SetupStatus = .ok
+
     // MARK: - Private
 
     private let ghService = GitHubService()
@@ -39,12 +47,9 @@ final class BoardViewModel {
     private static let trackedFoldersKey = "trackedFolders"
 
     init() {
-        // Restore persisted tracked folders
         trackedFolders =
             UserDefaults.standard.stringArray(forKey: Self.trackedFoldersKey) ?? []
-        // Detect installed apps once at launch
         availableApps = OpenInApp.detectInstalled()
-        // Load cached PRs for instant display on launch
         if let cached = cacheService.load() {
             pullRequests = cached.pullRequests
             lastRefresh = cached.lastRefresh
@@ -55,8 +60,8 @@ final class BoardViewModel {
 
     private var filteredPRs: [PullRequest] {
         pullRequests.filter { pr in
-            if let org = selectedOrg, pr.repoOwner != org { return false }
-            if let repo = selectedRepo, pr.repoFullName != repo { return false }
+            if !selectedOrgs.isEmpty, !selectedOrgs.contains(pr.repoOwner) { return false }
+            if !selectedRepos.isEmpty, !selectedRepos.contains(pr.repoFullName) { return false }
             return true
         }
     }
@@ -76,19 +81,41 @@ final class BoardViewModel {
 
     var repositories: [String] {
         let repos = pullRequests.filter { pr in
-            if let org = selectedOrg { return pr.repoOwner == org }
-            return true
+            selectedOrgs.isEmpty || selectedOrgs.contains(pr.repoOwner)
         }
         return Array(Set(repos.map(\.repoFullName))).sorted()
     }
 
     var hasActiveFilters: Bool {
-        selectedOrg != nil || selectedRepo != nil
+        !selectedOrgs.isEmpty || !selectedRepos.isEmpty
+    }
+
+    func toggleOrg(_ org: String) {
+        if selectedOrgs.contains(org) {
+            selectedOrgs.remove(org)
+        } else {
+            selectedOrgs.insert(org)
+        }
+        // Clear repos that no longer match selected orgs
+        if !selectedOrgs.isEmpty {
+            selectedRepos = selectedRepos.filter { repo in
+                let owner = repo.split(separator: "/").first.map(String.init) ?? ""
+                return selectedOrgs.contains(owner)
+            }
+        }
+    }
+
+    func toggleRepo(_ repo: String) {
+        if selectedRepos.contains(repo) {
+            selectedRepos.remove(repo)
+        } else {
+            selectedRepos.insert(repo)
+        }
     }
 
     func clearFilters() {
-        selectedOrg = nil
-        selectedRepo = nil
+        selectedOrgs.removeAll()
+        selectedRepos.removeAll()
     }
 
     // MARK: - Tracked Folders
@@ -96,14 +123,17 @@ final class BoardViewModel {
     func addTrackedFolder(_ path: String) {
         guard !trackedFolders.contains(path) else { return }
         trackedFolders.append(path)
+        Task { await refresh() }
     }
 
     func removeTrackedFolder(at offsets: IndexSet) {
         trackedFolders.remove(atOffsets: offsets)
+        Task { await refresh() }
     }
 
     func removeTrackedFolder(_ path: String) {
         trackedFolders.removeAll { $0 == path }
+        Task { await refresh() }
     }
 
     private func persistTrackedFolders() {
@@ -114,42 +144,44 @@ final class BoardViewModel {
 
     func refresh() async {
         guard !isLoading else { return }
+
+        let status = ghService.checkSetup()
+        setupStatus = status
+        guard status == .ok else { return }
         isLoading = true
         errorMessage = nil
 
+        async let wtTask = wtService.scanWorktrees(trackedFolders: trackedFolders)
+
+        var fetchedPRs: [PullRequest]?
         do {
-            // Fetch PRs and scan worktrees in parallel
-            async let prsTask = ghService.fetchAllPRs()
-            async let wtTask = wtService.scanWorktrees(trackedFolders: trackedFolders)
-
-            var prs = try await prsTask
-            let wtMap = await wtTask
-            worktreeMap = wtMap
-
-            // Attach worktree info to PRs
-            for i in prs.indices {
-                let key = WorktreeService.WorktreeKey(
-                    repoFullName: prs[i].repoFullName,
-                    branch: prs[i].headRefName ?? "")
-                prs[i].worktree = wtMap[key]
-            }
-
-            self.pullRequests = prs
-            self.lastRefresh = Date()
-
-            // Persist to disk cache for instant launch next time
-            cacheService.save(pullRequests: prs, lastRefresh: lastRefresh!)
-
-            // Clear stale filters
-            if let org = selectedOrg, !organizations.contains(org) {
-                selectedOrg = nil
-            }
-            if let repo = selectedRepo, !repositories.contains(repo) {
-                selectedRepo = nil
-            }
+            fetchedPRs = try await ghService.fetchAllPRs()
         } catch {
             errorMessage = error.localizedDescription
         }
+
+        let wtMap = await wtTask
+        worktreeMap = wtMap
+
+        if let prs = fetchedPRs {
+            self.pullRequests = prs
+            self.lastRefresh = Date()
+        }
+
+        for i in pullRequests.indices {
+            let key = WorktreeService.WorktreeKey(
+                repoFullName: pullRequests[i].repoFullName,
+                branch: pullRequests[i].headRefName ?? "")
+            pullRequests[i].worktree = worktreeMap[key]
+        }
+
+        if let lastRefresh {
+            cacheService.save(pullRequests: pullRequests, lastRefresh: lastRefresh)
+        }
+
+        // Clear stale filters
+        selectedOrgs = selectedOrgs.filter { organizations.contains($0) }
+        selectedRepos = selectedRepos.filter { repositories.contains($0) }
 
         isLoading = false
     }
@@ -164,6 +196,10 @@ final class BoardViewModel {
         pendingAction = .close(pr: pr)
     }
 
+    func confirmPublish(_ pr: PullRequest) {
+        pendingAction = .publish(pr: pr)
+    }
+
     func confirmUpdateBranch(_ pr: PullRequest) {
         pendingAction = .updateBranch(pr: pr)
     }
@@ -172,9 +208,6 @@ final class BoardViewModel {
         pendingAction = .deleteWorktree(pr: pr)
     }
 
-    /// Execute a PR action. Accepts an explicit action to avoid a race condition
-    /// where the alert's isPresented binding clears `pendingAction` before the
-    /// async Task body runs.
     func executeAction(_ explicitAction: PRAction? = nil) async {
         guard let action = explicitAction ?? pendingAction else { return }
         pendingAction = nil
@@ -185,32 +218,42 @@ final class BoardViewModel {
             case .merge(let pr, let strategy):
                 try await ghService.mergePR(
                     repo: pr.repoFullName, number: pr.number, strategy: strategy)
-                // Optimistic removal — GitHub search index lags behind reality
                 pullRequests.removeAll { $0.id == pr.id }
             case .close(let pr):
                 try await ghService.closePR(repo: pr.repoFullName, number: pr.number)
                 pullRequests.removeAll { $0.id == pr.id }
+            case .publish(let pr):
+                try await ghService.publishPR(repo: pr.repoFullName, number: pr.number)
+                // Optimistic: flip isDraft so it moves to In Review immediately
+                if let idx = pullRequests.firstIndex(where: { $0.id == pr.id }) {
+                    pullRequests[idx] = PullRequest(
+                        id: pr.id, number: pr.number, title: pr.title,
+                        repoOwner: pr.repoOwner, repoName: pr.repoName,
+                        isDraft: false, state: pr.state, url: pr.url,
+                        createdAt: pr.createdAt, updatedAt: pr.updatedAt,
+                        commentsCount: pr.commentsCount,
+                        reviewDecision: pr.reviewDecision,
+                        mergeStateStatus: pr.mergeStateStatus,
+                        additions: pr.additions, deletions: pr.deletions,
+                        headRefName: pr.headRefName, worktree: pr.worktree)
+                }
             case .updateBranch(let pr):
                 try await ghService.updateBranch(repo: pr.repoFullName, number: pr.number)
             case .deleteWorktree(let pr, let force):
                 guard let wt = pr.worktree else { return }
                 try await wtService.removeWorktree(
                     mainRepoPath: wt.mainRepoPath, worktreePath: wt.path, force: force)
-                // Clear worktree association so the card updates (or disappears from merged)
                 if let idx = pullRequests.firstIndex(where: { $0.id == pr.id }) {
                     pullRequests[idx].worktree = nil
                 }
             }
-            // Background refresh to sync full state from GitHub
             await refresh()
         } catch {
-            // If worktree remove failed (dirty), offer force delete
             if case .deleteWorktree(let pr, false) = action,
                 error.localizedDescription.contains("contains modified or untracked files")
                     || error.localizedDescription.contains("is dirty")
             {
-                actionError =
-                    "Worktree has uncommitted changes. Force delete?"
+                actionError = "Worktree has uncommitted changes. Force delete?"
                 pendingAction = .deleteWorktree(pr: pr, force: true)
             } else {
                 actionError = error.localizedDescription
@@ -247,9 +290,5 @@ final class BoardViewModel {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return "Updated \(formatter.localizedString(for: lastRefresh, relativeTo: Date()))"
-    }
-
-    var totalFilteredCount: Int {
-        filteredPRs.count
     }
 }

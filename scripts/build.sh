@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="GH PRs"
-BUNDLE_ID="com.gerardc.gh-prs"
+APP_NAME="PsyDuck"
+BUNDLE_ID="com.gerardc.psyduck"
 BUILD_DIR="$ROOT/.build/release"
 APP_DIR="$ROOT/dist/${APP_NAME}.app"
 
@@ -16,6 +16,9 @@ mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$BUILD_DIR/gh-prs" "$APP_DIR/Contents/MacOS/gh-prs"
+cp "$ROOT/Sources/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+# Copy SPM resource bundle so Bundle.module can find logo.png
+cp -r "$BUILD_DIR/gh-prs_gh-prs.bundle" "$APP_DIR/Contents/MacOS/"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -40,15 +43,38 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <string>15.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>LSUIElement</key>
     <false/>
 </dict>
 </plist>
 PLIST
 
+echo "Installing to /Applications..."
+rm -rf "/Applications/${APP_NAME}.app"
+cp -r "$APP_DIR" /Applications/
+
+# Create DMG for distribution
+DMG_DIR="$ROOT/dist/dmg-staging"
+DMG_PATH="$ROOT/dist/${APP_NAME}.dmg"
+
+echo "Creating DMG..."
+rm -rf "$DMG_DIR" "$DMG_PATH"
+mkdir -p "$DMG_DIR"
+cp -r "$APP_DIR" "$DMG_DIR/"
+# Add a symlink to /Applications for drag-to-install
+ln -s /Applications "$DMG_DIR/Applications"
+
+hdiutil create -volname "$APP_NAME" \
+    -srcfolder "$DMG_DIR" \
+    -ov -format UDZO \
+    "$DMG_PATH" \
+    -quiet
+
+rm -rf "$DMG_DIR"
+
 echo ""
-echo "Done! App bundle created at:"
-echo "  $APP_DIR"
-echo ""
-echo "To install, copy to /Applications:"
-echo "  cp -r \"$APP_DIR\" /Applications/"
+echo "Done!"
+echo "  Installed:  /Applications/${APP_NAME}.app"
+echo "  DMG:        $DMG_PATH"
