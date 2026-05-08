@@ -43,6 +43,7 @@ final class BoardViewModel {
     private let cacheService = CacheService()
     private var worktreeMap: [WorktreeService.WorktreeKey: Worktree] = [:]
     private var refreshTimer: Timer?
+    private var refreshTask: Task<Void, Never>?
 
     private static let trackedFoldersKey = "trackedFolders"
 
@@ -142,9 +143,18 @@ final class BoardViewModel {
 
     // MARK: - Data Fetching
 
+    /// Cancel any in-flight refresh and start a fresh one.
     func refresh() async {
-        guard !isLoading else { return }
+        refreshTask?.cancel()
 
+        let task = Task { @MainActor in
+            await performRefresh()
+        }
+        refreshTask = task
+        await task.value
+    }
+
+    private func performRefresh() async {
         let status = ghService.checkSetup()
         setupStatus = status
         guard status == .ok else { return }
@@ -158,8 +168,13 @@ final class BoardViewModel {
         do {
             fetchedPRs = try await ghService.fetchAllPRs()
         } catch {
-            errorMessage = error.localizedDescription
+            if !Task.isCancelled {
+                errorMessage = error.localizedDescription
+            }
         }
+
+        // Bail out if a newer refresh superseded us
+        guard !Task.isCancelled else { return }
 
         let wtMap = await wtTask
         worktreeMap = wtMap
@@ -180,7 +195,6 @@ final class BoardViewModel {
             cacheService.save(pullRequests: pullRequests, lastRefresh: lastRefresh)
         }
 
-        // Clear stale filters
         selectedOrgs = selectedOrgs.filter { organizations.contains($0) }
         selectedRepos = selectedRepos.filter { repositories.contains($0) }
     }
