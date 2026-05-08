@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install svu
+        run: brew install caarlos0/tap/svu
+
+      - name: Determine version
+        id: version
+        run: |
+          NEXT=$(svu next)
+          CURRENT=$(svu current 2>/dev/null || echo "v0.0.0")
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+          # Strip v prefix for build script
+          echo "semver=${NEXT#v}" >> "$GITHUB_OUTPUT"
+          if [ "$NEXT" = "$CURRENT" ]; then
+            echo "No version bump detected (current: $CURRENT). Skipping release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing $NEXT (was $CURRENT)"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and package DMG
+        if: steps.version.outputs.skip != 'true'
+        run: ./scripts/build.sh --version "${{ steps.version.outputs.semver }}" --no-install
+
+      - name: Create tag and release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.version.outputs.next }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            dist/PsyDuck.dmg

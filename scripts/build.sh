@@ -7,10 +7,32 @@ BUNDLE_ID="com.gerardc.psyduck"
 BUILD_DIR="$ROOT/.build/release"
 APP_DIR="$ROOT/dist/${APP_NAME}.app"
 
+# Defaults
+VERSION="1.0"
+INSTALL=true
+
+# Parse flags
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --no-install)
+            INSTALL=false
+            shift
+            ;;
+        *)
+            echo "Unknown flag: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
 echo "Building release binary..."
 swift build -c release --package-path "$ROOT"
 
-echo "Creating .app bundle..."
+echo "Creating .app bundle (v${VERSION})..."
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
@@ -32,9 +54,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>
     <string>${BUNDLE_ID}</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleExecutable</key>
     <string>gh-prs</string>
     <key>CFBundlePackageType</key>
@@ -51,9 +73,11 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "Installing to /Applications..."
-rm -rf "/Applications/${APP_NAME}.app"
-cp -r "$APP_DIR" /Applications/
+if [ "$INSTALL" = true ]; then
+    echo "Installing to /Applications..."
+    rm -rf "/Applications/${APP_NAME}.app"
+    cp -r "$APP_DIR" /Applications/
+fi
 
 # Create DMG for distribution
 DMG_DIR="$ROOT/dist/dmg-staging"
@@ -76,5 +100,7 @@ rm -rf "$DMG_DIR"
 
 echo ""
 echo "Done!"
-echo "  Installed:  /Applications/${APP_NAME}.app"
+if [ "$INSTALL" = true ]; then
+    echo "  Installed:  /Applications/${APP_NAME}.app"
+fi
 echo "  DMG:        $DMG_PATH"
