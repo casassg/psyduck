@@ -11,9 +11,13 @@ final class BoardViewModel {
     var errorMessage: String?
     var lastRefresh: Date?
 
-    // Filters (multi-select: empty set = all)
-    var selectedOrgs: Set<String> = []
-    var selectedRepos: Set<String> = []
+    // Filters (multi-select: empty set = all, persisted across sessions)
+    var selectedOrgs: Set<String> = [] {
+        didSet { persistFilters() }
+    }
+    var selectedRepos: Set<String> = [] {
+        didSet { persistFilters() }
+    }
 
     // Settings
     var showSettings = false
@@ -45,11 +49,24 @@ final class BoardViewModel {
     private var refreshTimer: Timer?
     private var refreshTask: Task<Void, Never>?
 
+    /// PR IDs recently acted on (merge/close) with the time of action.
+    /// Used to suppress stale search-index results for a grace period.
+    private var recentlyActedPRs: [String: Date] = [:]
+    private static let actedGracePeriod: TimeInterval = 60
+
     private static let trackedFoldersKey = "trackedFolders"
+    private static let selectedOrgsKey = "selectedOrgs"
+    private static let selectedReposKey = "selectedRepos"
 
     init() {
         trackedFolders =
             UserDefaults.standard.stringArray(forKey: Self.trackedFoldersKey) ?? []
+        if let orgs = UserDefaults.standard.stringArray(forKey: Self.selectedOrgsKey) {
+            selectedOrgs = Set(orgs)
+        }
+        if let repos = UserDefaults.standard.stringArray(forKey: Self.selectedReposKey) {
+            selectedRepos = Set(repos)
+        }
         availableApps = OpenInApp.detectInstalled()
         if let cached = cacheService.load() {
             pullRequests = cached.pullRequests
@@ -141,6 +158,11 @@ final class BoardViewModel {
         UserDefaults.standard.set(trackedFolders, forKey: Self.trackedFoldersKey)
     }
 
+    private func persistFilters() {
+        UserDefaults.standard.set(Array(selectedOrgs), forKey: Self.selectedOrgsKey)
+        UserDefaults.standard.set(Array(selectedRepos), forKey: Self.selectedReposKey)
+    }
+
     // MARK: - Data Fetching
 
     /// Cancel any in-flight refresh and start a fresh one.
@@ -164,9 +186,10 @@ final class BoardViewModel {
 
         async let wtTask = wtService.scanWorktrees(trackedFolders: trackedFolders)
 
+        // Pass current PRs so enrichment data is carried forward on failure.
         var fetchedPRs: [PullRequest]?
         do {
-            fetchedPRs = try await ghService.fetchAllPRs()
+            fetchedPRs = try await ghService.fetchAllPRs(existing: pullRequests)
         } catch {
             if !Task.isCancelled {
                 errorMessage = error.localizedDescription
@@ -179,24 +202,36 @@ final class BoardViewModel {
         let wtMap = await wtTask
         worktreeMap = wtMap
 
-        if let prs = fetchedPRs {
+        if var prs = fetchedPRs {
+            // Expire old entries from the grace-period set.
+            let now = Date()
+            recentlyActedPRs = recentlyActedPRs.filter {
+                now.timeIntervalSince($0.value) < Self.actedGracePeriod
+            }
+
+            // Suppress PRs that were recently merged/closed to prevent
+            // stale search-index results from reverting optimistic removal.
+            if !recentlyActedPRs.isEmpty {
+                prs.removeAll { recentlyActedPRs[$0.id] != nil }
+            }
+
+            // Merge worktree data into the fetched PRs before assignment
+            // so the board never sees PRs without worktree associations.
+            for i in prs.indices {
+                let key = WorktreeService.WorktreeKey(
+                    repoFullName: prs[i].repoFullName,
+                    branch: prs[i].headRefName ?? "")
+                prs[i].worktree = wtMap[key]
+            }
+
+            // Single atomic assignment — board goes from old state to new in one step.
             self.pullRequests = prs
             self.lastRefresh = Date()
-        }
 
-        for i in pullRequests.indices {
-            let key = WorktreeService.WorktreeKey(
-                repoFullName: pullRequests[i].repoFullName,
-                branch: pullRequests[i].headRefName ?? "")
-            pullRequests[i].worktree = worktreeMap[key]
+            if let lastRefresh {
+                cacheService.save(pullRequests: pullRequests, lastRefresh: lastRefresh)
+            }
         }
-
-        if let lastRefresh {
-            cacheService.save(pullRequests: pullRequests, lastRefresh: lastRefresh)
-        }
-
-        selectedOrgs = selectedOrgs.filter { organizations.contains($0) }
-        selectedRepos = selectedRepos.filter { repositories.contains($0) }
     }
 
     // MARK: - PR Actions
@@ -231,9 +266,11 @@ final class BoardViewModel {
             case .merge(let pr, let strategy):
                 try await ghService.mergePR(
                     repo: pr.repoFullName, number: pr.number, strategy: strategy)
+                recentlyActedPRs[pr.id] = Date()
                 pullRequests.removeAll { $0.id == pr.id }
             case .close(let pr):
                 try await ghService.closePR(repo: pr.repoFullName, number: pr.number)
+                recentlyActedPRs[pr.id] = Date()
                 pullRequests.removeAll { $0.id == pr.id }
             case .publish(let pr):
                 try await ghService.publishPR(repo: pr.repoFullName, number: pr.number)

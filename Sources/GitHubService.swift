@@ -43,12 +43,18 @@ final class GitHubService: Sendable {
     // MARK: - Public API
 
     /// Fetch all PRs for the board: open + recently merged, then enrich ALL with `gh pr view`.
-    func fetchAllPRs() async throws -> [PullRequest] {
+    /// Pass existing PRs so enrichment data can be carried forward when `gh pr view` or
+    /// `gh pr checks` fails (rate-limit, timeout, network blip) instead of falling back to
+    /// defaults that cause column misclassification.
+    func fetchAllPRs(existing: [PullRequest] = []) async throws -> [PullRequest] {
         async let openPRs = fetchOpenPRs()
         async let mergedPRs = fetchMergedPRs()
 
         var all = try await openPRs
         all.append(contentsOf: try await mergedPRs)
+
+        // Build a lookup of previous enrichment data keyed by PR id.
+        let previousById = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
 
         // Enrich every PR in parallel: gh pr view for details + gh pr checks for required CI status.
         try await withThrowingTaskGroup(of: (Int, PRViewResult?, [RequiredCheck]?).self) { group in
@@ -62,16 +68,29 @@ final class GitHubService: Sendable {
                 }
             }
             for try await (index, detail, checks) in group {
+                let prev = previousById[all[index].id]
+
                 if let detail {
                     all[index].reviewDecision = detail.reviewDecision
                     all[index].mergeStateStatus = detail.mergeStateStatus
                     all[index].additions = detail.additions
                     all[index].deletions = detail.deletions
                     all[index].headRefName = detail.headRefName
+                } else if let prev {
+                    // Carry forward previous enrichment so the PR doesn't jump columns.
+                    all[index].reviewDecision = prev.reviewDecision
+                    all[index].mergeStateStatus = prev.mergeStateStatus
+                    all[index].additions = prev.additions
+                    all[index].deletions = prev.deletions
+                    all[index].headRefName = prev.headRefName
                 }
+
                 if let checks {
                     all[index].hasFailedRequiredChecks = checks.contains { $0.bucket == "fail" || $0.bucket == "cancel" }
                     all[index].hasRunningRequiredChecks = checks.contains { $0.bucket == "pending" }
+                } else if let prev {
+                    all[index].hasFailedRequiredChecks = prev.hasFailedRequiredChecks
+                    all[index].hasRunningRequiredChecks = prev.hasRunningRequiredChecks
                 }
             }
         }

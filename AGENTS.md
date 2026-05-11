@@ -1,4 +1,4 @@
-# gh-prs
+# PsyDuck
 
 Native macOS SwiftUI app. Kanban board for GitHub PRs with local worktree tracking.
 
@@ -19,6 +19,7 @@ Sources/
   GitHubService.swift    # Wraps gh CLI: search, view, checks, merge, close, update-branch
   WorktreeService.swift  # Scans tracked folders for git repos, discovers worktrees via porcelain format
   BoardViewModel.swift   # @Observable @MainActor. State, filters, auto-refresh timer, PR actions
+  CacheService.swift     # Disk cache in ~/Library/Caches/com.gerardc.psyduck/ for instant launch
   Views/
     ContentView.swift    # Toolbar, filter pills, confirmation dialogs, settings sheet trigger
     KanbanBoard.swift    # HStack of 5 ColumnViews
@@ -33,10 +34,12 @@ Sources/
 - Optimistic UI removal after close/merge (GitHub search index lags).
 - Confirmation alert race fix: button closures capture action synchronously before alert dismiss clears pendingAction.
 - OpenInApp detection via `which` on PATH, not hardcoded binary paths.
+- Refresh uses cancel-and-restart (`Task` cancellation) to prevent concurrent refreshes stomping state.
+- SPM resources: `logo.png` is a `.copy` resource accessed via `Bundle.module`, not `Bundle.main`.
 
 ## Columns
 
-Draft | In Review | Validation | Approved | Merged (worktree-only).
+Draft | Validation | Waiting for Review | Approved | Merged (worktree-only).
 
 Validation = approved but blocked: CI Running (amber), CI Failed (red), Merge Conflicts (red), Behind Base (amber).
 Approved = `reviewDecision == APPROVED` AND `mergeStateStatus == CLEAN` AND no failed required checks.
