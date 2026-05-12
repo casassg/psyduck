@@ -6,88 +6,81 @@
 
 ## Summary
 
-Extend PsyDuck from a GitHub PR kanban board into a full task-lifecycle tool by adding four new columns—Triage, Planning, Ready, Building—that bridge Linear tickets to agent-generated code and draft PRs. Inspired by [OpenAI Harness Engineering](https://openai.com/index/harness-engineering/) and [Symphony](https://github.com/openai/symphony).
+Extend PsyDuck from a GitHub PR kanban board into a full task-lifecycle tool. Three new columns—Triage, Plan, Build—bridge tasks to agent-generated code and draft PRs. Existing PR columns gain an "Agent" button for any card with a local worktree. Agent communication uses [ACP (Agent Client Protocol)](https://agentclientprotocol.com), giving compatibility with 30+ coding agents through a single protocol implementation.
 
-## Motivation
+Inspired by [OpenAI Harness Engineering](https://openai.com/index/harness-engineering/) and [Symphony](https://github.com/openai/symphony).
 
-The current app tracks PRs after they exist. The gap is everything before: triaging a ticket, designing a solution, writing the code, and creating the PR. This RFC fills that gap by integrating Linear as the work source and headless coding agents as the execution engine, with human review at every handoff.
-
-## Column Flow
+## Columns (8, horizontal scroll)
 
 ```
-Triage → Planning → Ready → Building → Draft → Validation → In Review → Approved → Merged
-            ↑                   ↑         │
-            └── Ready (revise) ─┘         │
-                                          └── Building (apply feedback) ─┘
+Triage → Plan → Build → Draft → Validation → In Review → Approved → Merged
+           ↑              ↑                       │
+           └── (revise) ──┘   (Agent button) ─────┘
+                              moves PR to Build temporarily
 ```
 
-- **Triage**: Linear tickets created by or assigned to the user. Entry point.
-- **Planning**: AI agent generates an RFC/plan document from ticket context. Steerable.
-- **Ready**: Human reviews plan. Approve (select repos) or revise (add inline comments → back to Planning).
-- **Building**: Agent codes in isolated worktrees. Creates draft PR on completion → enters existing Draft column.
-- **Draft → Building loop**: "Review Feedback" button reads GH comments + CI, sends agent back to fix.
+- **Triage**: Tasks from Linear sync + manual creation. Filter pills for team/project.
+- **Plan**: Agent generates RFC/plan. Card shows agent output while running, "Ready for Review" badge when done. User reviews in sheet overlay, approves (pick repos → Build) or revises (stays in Plan, agent re-runs with comments).
+- **Build**: Agent codes in worktrees, pushes, creates draft PR via `gh` → card exits to Draft. Also temporarily hosts PR cards sent from Draft/Validation/InReview via the "Agent" button.
+- **Draft–Merged**: Existing PR columns. Any card with a detected local worktree gets an "Agent" button (pick agent/model, write prompt or use quick actions → card moves to Build temporarily → returns to correct PR column when agent finishes and pushes).
 
-## Architecture
+## Data Model
 
-### Data Models
+### BoardTask
 
-#### LinearTicket
+Source-agnostic. Linear is a sync source that hydrates these; manual tasks are first-class.
 
 ```swift
-struct LinearTicket: Identifiable, Equatable, Sendable, Codable {
-    let id: String
-    let identifier: String          // "ENG-123"
-    let title: String
-    let description: String?
-    let priority: Int?              // 1=urgent, 2=high, 3=medium, 4=low
-    let state: String
-    let assignee: String?
-    let creator: String?
-    let labels: [String]
-    let url: String?
-    let branchName: String?
-    let comments: [TicketComment]   // all ticket comments
-    let createdAt: Date
-    let updatedAt: Date
-}
+struct BoardTask: Identifiable, Equatable, Sendable, Codable {
+    let id: String                      // UUID
+    var title: String
+    var description: String?
+    var priority: TaskPriority?
+    var labels: [String]
+    var branchName: String?             // from Linear or user-provided
+    var url: String?                    // Linear URL, nil for manual tasks
+    var comments: [TaskComment]
+    var links: [String]                 // extracted URLs (Slack threads, docs)
 
-struct TicketComment: Equatable, Sendable, Codable {
-    let author: String
-    let body: String
-    let createdAt: Date
-}
-```
+    // Linear sync metadata (nil for manual tasks)
+    var linearId: String?
+    var linearIdentifier: String?       // "ENG-123"
+    var linearUpdatedAt: Date?
 
-#### PsyDuckTask
-
-The central model for items flowing through Triage → Building.
-
-```swift
-struct PsyDuckTask: Identifiable, Equatable, Sendable, Codable {
-    let id: String                      // derived from ticket.id
-    var ticket: LinearTicket
+    // Lifecycle
     var phase: TaskPhase
-    var planPath: URL?                  // path to plan.md on disk
-    var selectedRepos: [String]?        // repo full names for building
-    var worktrees: [TaskWorktree]?      // created worktrees
-    var agentType: AgentType
-    var pokemonName: String?            // workspace folder name
-    var draftPRNumbers: [PRRef]?        // created draft PR references
+    var planStatus: PlanStatus?         // only relevant when phase == .plan
+    var planPath: URL?
+    var selectedRepos: [String]?
+    var worktrees: [TaskWorktree]?
+
+    // Agent config per phase (chosen at start of plan/build)
+    var planningAgentId: String?
+    var planningModel: String?
+    var buildingAgentId: String?
+    var buildingModel: String?
+
+    var draftPRRefs: [PRRef]?
     var createdAt: Date
     var updatedAt: Date
 }
 
-enum TaskPhase: String, Codable, CaseIterable {
-    case triage
-    case planning
-    case ready
-    case building
+enum TaskPhase: String, Codable { case triage, plan, build }
+
+enum PlanStatus: String, Codable { case agentRunning, readyForReview, revising }
+
+enum TaskPriority: Int, Codable { case urgent = 1, high = 2, medium = 3, low = 4 }
+
+struct TaskComment: Equatable, Sendable, Codable {
+    let author: String
+    let body: String
+    let createdAt: Date
 }
 
 struct TaskWorktree: Equatable, Sendable, Codable {
-    let repoFullName: String            // "owner/repo"
+    let repoFullName: String
     let branch: String
-    let path: String                    // absolute path to worktree
+    let path: String
 }
 
 struct PRRef: Equatable, Sendable, Codable {
@@ -95,643 +88,364 @@ struct PRRef: Equatable, Sendable, Codable {
     let number: Int
     let url: String
 }
+```
 
-enum AgentType: String, CaseIterable, Identifiable, Codable, Sendable {
-    case opencode
-    case claudeCode
-    case codex
-    case amp
-    case aider
+### PRAgentSession
 
-    var id: String { rawValue }
+Tracks a PR card temporarily moved to Build.
 
-    var displayName: String {
-        switch self {
-        case .opencode: "OpenCode"
-        case .claudeCode: "Claude Code"
-        case .codex: "Codex"
-        case .amp: "Amp"
-        case .aider: "Aider"
+```swift
+struct PRAgentSession: Codable, Equatable, Sendable {
+    let prNumber: Int
+    let repoFullName: String
+    let worktreePath: String
+    let agentId: String
+    let model: String?
+    let prompt: String
+    let returnColumn: KanbanColumn
+}
+```
+
+### KanbanColumn
+
+```swift
+enum KanbanColumn: String, CaseIterable, Identifiable {
+    case triage, plan, build
+    case draft, validation, inReview, approved, merged
+}
+```
+
+### Agent Configuration
+
+```swift
+struct AgentConfig: Codable, Equatable, Sendable, Identifiable {
+    let id: String              // "opencode", "claude-code", "codex", etc.
+    var displayName: String
+    var command: String          // binary name or path
+    var args: [String]           // extra CLI args
+    var defaultModel: String?    // e.g. "claude-sonnet-4"
+    var acpNative: Bool          // true if agent speaks ACP without a wrapper
+    var isAvailable: Bool        // true if binary found on PATH
+}
+
+struct AgentPreferences: Codable, Equatable, Sendable {
+    var agents: [AgentConfig]
+    var defaultPlanningAgentId: String?
+    var defaultBuildingAgentId: String?
+    var permissionPolicy: PermissionPolicy
+}
+
+enum PermissionPolicy: String, Codable { case autoApprove, askUser }
+```
+
+Model is passed to the agent subprocess via CLI flag (`--model`) or env var, depending on agent. Small mapping table in `AgentConfig`:
+
+```swift
+extension AgentConfig {
+    func processArgs(modelOverride: String?) -> [String] {
+        var result = args
+        if let model = modelOverride ?? defaultModel {
+            switch id {
+            case "opencode", "claude-code", "codex", "gemini":
+                result += ["--model", model]
+            default: break
+            }
         }
+        return result
     }
 }
 ```
 
-#### AgentEvent (parsed from JSON stream)
+## Agent Communication: ACP
+
+PsyDuck is an [ACP Client](https://agentclientprotocol.com/get-started/architecture). Single implementation, works with any ACP-compatible agent.
+
+### Why ACP
+
+ACP is "LSP for coding agents"—JSON-RPC 2.0 over stdio. Instead of writing custom adapters for each agent's proprietary CLI, we implement ACP once. Compatible agents include OpenCode (native), Claude Code (via `claude-agent-acp`), Codex CLI (via `codex-acp`), Goose, Gemini CLI, GitHub Copilot, Cursor, Cline, Kiro CLI, and 20+ more.
+
+### ACPClient
 
 ```swift
-enum AgentEvent: Sendable {
-    case thinking(text: String)
-    case readingFile(path: String)
-    case writingFile(path: String)
-    case runningCommand(command: String)
-    case commandOutput(text: String)
-    case message(text: String)
-    case error(text: String)
-    case completed
-    case unknown(raw: String)
+final class ACPClient: @unchecked Sendable {
+    // Lifecycle
+    static func connect(command: String, args: [String], env: [String: String]) async throws -> ACPClient
+
+    // Sessions
+    func createSession(cwd: URL, mcpServers: [MCPServerConfig]?) async throws -> String
+    func closeSession(id: String) async throws
+
+    // Prompts (initial + steering follow-ups)
+    func prompt(sessionId: String, content: [ACPContentBlock]) async throws -> ACPStopReason
+
+    // Streaming updates (notifications from agent)
+    var onUpdate: (@Sendable (ACPSessionUpdate) -> Void)?
+    var onPermissionRequest: (@Sendable (ACPPermissionRequest) async -> ACPPermissionResponse)?
+
+    // Control
+    func cancel(sessionId: String) async
+    func kill()
 }
 ```
 
-### New Services
+### Client Capabilities
 
-#### LinearService
+PsyDuck advertises during `initialize`:
 
-Wraps the Linear GraphQL API using the user's personal API key.
-
-```swift
-final class LinearService: Sendable {
-    /// Fetch tickets created by or assigned to the authenticated user.
-    /// Ordered by updatedAt descending. Uses Personal API key from settings.
-    func fetchMyTickets(apiKey: String) async throws -> [LinearTicket]
-
-    /// Fetch a single ticket with full details (comments, links, relations).
-    func fetchTicket(id: String, apiKey: String) async throws -> LinearTicket
+```json
+{
+    "clientCapabilities": {
+        "fs": { "readTextFile": true, "writeTextFile": true },
+        "terminal": true
+    },
+    "clientInfo": { "name": "psyduck", "title": "PsyDuck", "version": "2.0.0" }
 }
 ```
 
-Implementation approach:
-- Direct HTTPS requests to `https://api.linear.app/graphql` using `URLSession`.
-- GraphQL query filters: `assignedTo: me OR createdBy: me`, non-terminal states.
-- Parse JSON response into `LinearTicket` structs.
-- No `gh` CLI dependency—Linear has no CLI we'd use.
+- **fs**: Agent calls `fs/read_text_file` and `fs/write_text_file` → PsyDuck reads/writes files scoped to workspace.
+- **terminal**: Agent calls `terminal/create` → PsyDuck spawns subprocess, streams output.
+- **permissions**: Agent calls `session/request_permission` → auto-approve or prompt user.
 
-#### AgentService
+### ACP Session Updates → UI
 
-Manages agent process lifecycle. Launches headless agents, streams JSON output, supports steering.
+| ACP Update | UI Rendering |
+|---|---|
+| `agent_message_chunk` (text) | Streaming text in output view |
+| `plan` (entries) | Checklist with priority badges and status icons |
+| `tool_call` kind=`read` | "Reading src/auth.ts" with file icon |
+| `tool_call` kind=`edit` + `diff` | Inline diff viewer |
+| `tool_call` kind=`execute` + `terminal` | Live terminal output |
+| `tool_call` kind=`search` | Search results |
+| `tool_call` kind=`think` | Thinking indicator |
 
-```swift
-@Observable @MainActor
-final class AgentService {
-    /// Active agent runs keyed by task ID.
-    private(set) var activeRuns: [String: AgentRun] = [:]
+### Steering
 
-    /// Launch an agent for planning or building.
-    func launch(taskId: String, agent: AgentType, prompt: String,
-                workingDir: URL, contextFiles: [URL]) -> AgentRun
+Works naturally via ACP. Agent finishes a turn → `session/prompt` returns. User types a follow-up → PsyDuck sends another `session/prompt` on the same session. Same context, no hacks.
 
-    /// Send a steering message to a running agent.
-    func steer(taskId: String, message: String)
+## Linear Sync
 
-    /// Kill a running agent.
-    func kill(taskId: String)
-}
+`LinearService` fetches tickets via GraphQL API (`https://api.linear.app/graphql`) using a personal API key. Returns transient `LinearTicketDTO` structs. Sync logic upserts into `[BoardTask]`:
 
-@Observable
-final class AgentRun: Identifiable {
-    let id: String
-    let process: Process
-    var events: [AgentEvent] = []
-    var isRunning: Bool = true
-    var exitCode: Int32?
-}
+- New tickets → create `BoardTask` with `linearId` set, `phase: .triage`.
+- Existing tickets → update title, description, comments, labels, branchName if `updatedAt` is newer.
+- Tickets gone from API → remove only if task is still in `.triage`. Tasks in Plan/Build/beyond are never auto-removed.
+- No writes to Linear (read-only).
+
+## Worktree Management
+
+Worktrees live under `~/.psyduck/worktrees/{identifier}/{repo-name}/`. Identifier is the Linear identifier (e.g. `ENG-123`) or a short UUID prefix for manual tasks.
+
+### Creation Sequence
+
+```
+1. git fetch origin
+2. default_branch = gh api repos/{owner}/{repo} --jq .default_branch
+3. if origin/{branchName} exists:
+     git worktree add <path> origin/{branchName}
+   else:
+     git worktree add <path> -b {branchName} origin/{defaultBranch}
 ```
 
-Agent execution via Swift `Process` + `Pipe`:
-- Each agent adapter builds the correct CLI command.
-- stdout pipe reads JSON/JSONL lines, parsed into `AgentEvent`.
-- stdin pipe allows writing steering messages.
-- Process termination signals completion.
+Always branches from latest remote state. Handles both fresh branches and existing ones (feedback loop case).
 
-#### AgentAdapter Protocol
-
-```swift
-protocol AgentAdapter: Sendable {
-    var agentType: AgentType { get }
-
-    /// CLI command + args for planning mode.
-    func planCommand(prompt: String, workDir: URL, contextFiles: [URL]) -> ProcessConfig
-
-    /// CLI command + args for building mode.
-    func buildCommand(prompt: String, workDir: URL, contextFiles: [URL]) -> ProcessConfig
-
-    /// Parse one line of stdout into a structured event.
-    func parseEvent(line: String) -> AgentEvent?
-
-    /// Format a steering message for stdin.
-    func formatSteering(message: String) -> String
-}
-
-struct ProcessConfig: Sendable {
-    let executablePath: String
-    let arguments: [String]
-    let environment: [String: String]
-    let workingDirectory: URL
-}
-```
-
-Adapter implementations per agent:
-
-| Agent | Plan command | Build command | JSON flag | Steering |
-|-------|-------------|---------------|-----------|----------|
-| OpenCode | `opencode run --dir {dir} --format json -f {ctx} "…"` | same | `--format json` | stdin newline |
-| Claude Code | `claude -p "…" --output-format stream-json --bare` | same + `--allowedTools` | `--output-format stream-json` | not supported in `-p` mode; use `--resume` |
-| Codex | `codex exec --cd {dir} --json "…"` | same + `--sandbox workspace-write` | `--json` | stdin |
-| Amp | `amp -x "…" --stream-json` | same + `--dangerously-allow-all` | `--stream-json` | not supported in `-x` |
-| Aider | `aider -m "…" --yes {files}` | same | no native JSON | not supported |
-
-Note: Steering (sending follow-up prompts mid-run) is limited by agent capabilities. OpenCode and Codex support it via stdin. Claude Code and Amp require stopping and resuming with `--resume`/`threads continue`. For agents that don't support live steering, the UI should show "Stop & Redirect" instead of inline steering.
-
-#### TicketContextService
-
-Exports a Linear ticket to a self-contained markdown file the agent can read.
-
-```swift
-struct TicketContextService: Sendable {
-    /// Export a ticket to a markdown file at the given directory.
-    /// Returns the path to the created context.md file.
-    func exportTicket(_ ticket: LinearTicket, to directory: URL) throws -> URL
-}
-```
-
-Output format (`context.md`):
-
-```markdown
-# {identifier}: {title}
-
-**Priority**: {priority} | **State**: {state} | **Assignee**: {assignee}
-**Labels**: {labels} | **Created**: {createdAt} | **Updated**: {updatedAt}
-**URL**: {url}
-
-## Description
-
-{full markdown description}
-
-## Comments
-
-### @{author} ({date})
-{comment body}
-
-## Links
-- {extracted URLs from description and comments}
-
-## Relations
-- Blocks: {related tickets}
-- Blocked by: {blocking tickets}
-```
-
-#### PlanService
-
-Manages plan files on disk under `~/.psyduck/plans/`.
-
-```swift
-struct PlanService: Sendable {
-    let plansRoot: URL  // ~/.psyduck/plans/
-
-    /// Get or create the plan directory for a task.
-    func planDirectory(for taskId: String, identifier: String) -> URL
-
-    /// Read the plan markdown file.
-    func readPlan(at path: URL) throws -> String
-
-    /// Check if a plan has inline review comments.
-    func hasReviewComments(at path: URL) throws -> Bool
-
-    /// Strip review comments from a plan (for agent re-read).
-    func stripComments(from plan: String) -> String
-}
-```
-
-Plan review comments use inline markdown blockquotes:
-
-```markdown
-## Authentication Flow
-
-The service should use OAuth2 with PKCE for the auth flow...
-
-> **REVIEW**: Have we considered using the existing auth middleware
-> from the shared-auth package? That would save us from reimplementing
-> token refresh. — gerardc
-
-The token refresh logic will handle...
-```
-
-When the plan is sent back to Planning, the agent receives:
-1. The plan with comments still in it (so it can see what was said where).
-2. A prompt: "Revise this plan. Address all `> **REVIEW**:` comments inline. Remove the comment blocks after addressing them."
-
-#### TaskWorktreeService
-
-Creates and manages worktrees under `~/.psyduck/worktrees/`.
-
-```swift
-final class TaskWorktreeService: Sendable {
-    let worktreeRoot: URL  // ~/.psyduck/worktrees/
-
-    /// Create worktrees for a task. One per selected repo.
-    /// Returns the pokemon name and worktree paths.
-    func createWorktrees(
-        taskId: String,
-        repos: [(fullName: String, localPath: URL)],
-        branchName: String
-    ) async throws -> (pokemonName: String, worktrees: [TaskWorktree])
-
-    /// Remove worktrees for a task.
-    func removeWorktrees(pokemonName: String) async throws
-
-    /// List existing worktrees under the root.
-    func listWorktrees() throws -> [String]  // pokemon names
-}
-```
-
-Worktree creation steps:
-1. Pick pokemon name from embedded list (hash of task ID, collision-resistant).
-2. Create `~/.psyduck/worktrees/{pokemon}/`.
-3. For each repo: `git worktree add {pokemon}/{repo-name} -b {branch}` from the repo's main checkout.
-4. Return paths for agent to work in.
-
-Pokemon name list: embed Gen 1 names (bulbasaur through mew, 151 names). Derive index from `taskId.hashValue % 151`. On collision with existing worktrees, append `-2`, `-3`, etc.
-
-### Workspace Layout
+## Workspace Layout
 
 ```
 ~/.psyduck/
 ├── plans/
 │   └── ENG-123/
-│       ├── context.md           # Linear ticket as markdown (input for agent)
-│       ├── plan.md              # RFC generated by agent (output)
-│       └── repos/               # Shallow clones for planning
-│           ├── owner--repo-1/
-│           └── owner--repo-2/
-├── worktrees/
-│   └── bulbasaur/               # Pokemon name per task
-│       ├── repo-name-1/         # git worktree
-│       └── repo-name-2/         # git worktree
-└── agents.md                    # Optional: shared agent instructions
+│       ├── context.md           # task exported as markdown
+│       ├── plan.md              # RFC generated by agent
+│       └── repos/               # shallow clones for planning
+│           └── owner--repo/
+└── worktrees/
+    └── ENG-123/
+        ├── repo-name-1/         # git worktree
+        └── repo-name-2/
 ```
 
-### Settings Expansion
+## Settings
 
-Current settings: `trackedFolders: [String]` in UserDefaults.
+Stored in UserDefaults (matching existing pattern).
 
-New settings stored in UserDefaults:
+- **Linear**: API key.
+- **Agents**: List of configured agents (command, default model per agent, ACP native flag). Auto-discovery from PATH.
+- **Defaults**: Default planning agent, default building agent.
+- **Permissions**: Auto-approve or ask user for each tool call.
+- **Directories**: Plans root (`~/.psyduck/plans/`), worktrees root (`~/.psyduck/worktrees/`).
+- **Tracked folders**: Existing.
 
-```swift
-// Keys
-"linearApiKey"          // String — Linear Personal API key
-"defaultAgentType"      // String — AgentType raw value
-"plansDirectory"        // String — custom plans root (default ~/.psyduck/plans/)
-"worktreeDirectory"     // String — custom worktree root (default ~/.psyduck/worktrees/)
-```
+## Agent Prompts
 
-The SettingsSheet gets new sections:
-1. **Linear Integration**: API key text field with paste support.
-2. **Agent Configuration**: Picker for default agent. Per-agent binary path overrides (optional).
-3. **Directories**: Plan storage and worktree root paths.
+### Planning
 
-### BoardViewModel Changes
-
-The ViewModel currently manages only `[PullRequest]`. It needs to also manage `[PsyDuckTask]`.
-
-```swift
-@Observable @MainActor
-final class BoardViewModel {
-    // Existing
-    var pullRequests: [PullRequest] = []
-
-    // New
-    var tasks: [PsyDuckTask] = []
-    var linearTickets: [LinearTicket] = []  // raw tickets for triage
-
-    // Computed: board items per column
-    var triageItems: [LinearTicket] { ... }
-    var planningItems: [PsyDuckTask] { ... }
-    var readyItems: [PsyDuckTask] { ... }
-    var buildingItems: [PsyDuckTask] { ... }
-    // Existing PR columns stay the same
-
-    // Actions
-    func startPlanning(ticket: LinearTicket, agent: AgentType) async { ... }
-    func approvePlan(task: PsyDuckTask, repos: [String]) async { ... }
-    func revisePlan(task: PsyDuckTask) async { ... }
-    func reviewFeedback(pr: PullRequest) async { ... }
-}
-```
-
-Refresh cycle change:
-- Existing: fetch PRs → enrich → match worktrees → update UI.
-- New: also fetch Linear tickets → update `linearTickets` → update task phases.
-- Cache both PRs and tasks.
-
-### KanbanBoard Changes
-
-Currently renders 5 `ColumnView`s from `KanbanColumn.allCases`. Needs to render 9 columns.
-
-The existing `KanbanColumn` enum expands:
-
-```swift
-enum KanbanColumn: String, CaseIterable, Identifiable {
-    case triage
-    case planning
-    case ready
-    case building
-    case draft
-    case validation
-    case inReview
-    case approved
-    case merged
-}
-```
-
-Each column renders either `PRCard` (for PR-based columns) or a new `TaskCard` (for task-based columns) or both (Draft column can have both PRs and tasks that just created draft PRs).
-
-### New Views
-
-#### TaskCard
-
-Similar to `PRCard` but for `PsyDuckTask` / `LinearTicket`:
+Suggested template (agent can deviate):
 
 ```
-┌─────────────────────────────┐
-│ ENG-123                 ▼ P2│
-│ Implement OAuth2 flow       │
-│ backend, auth               │
-│ Updated 2h ago              │
-│                             │
-│ [Plan ▶]  or  [View Plan]  │
-│          or  [Building...]  │
-└─────────────────────────────┘
-```
+You are a senior software engineer. Write a detailed plan for the following task.
 
-Buttons vary by phase:
-- **Triage**: "Plan" button (pick agent, start planning).
-- **Planning**: Shows agent progress. "Stop" button. Steering input.
-- **Ready**: "View Plan" button. "Approve" / "Revise" buttons.
-- **Building**: Shows agent progress. "Stop" button. Steering input.
+Read the task context at: {context.md path}
 
-#### AgentOutputView
+Relevant codebase(s) cloned at:
+{list of shallow clone paths}
 
-Expandable panel that shows real-time agent events:
-
-```
-┌─────────────────────────────┐
-│ 🔍 Reading src/auth.ts      │
-│ 💭 Analyzing OAuth2 flow... │
-│ 📝 Writing plan section 3   │
-│ ⚡ Running: npm test         │
-│ ✅ Tests passed              │
-│                             │
-│ [Send message...        ] ▶ │
-└─────────────────────────────┘
-```
-
-- Scrollable, auto-scrolls to bottom.
-- Each event type gets an icon and formatting.
-- Steering input field at bottom.
-- Expand/collapse per card.
-
-#### PlanReviewView
-
-Sheet/panel for reviewing a plan in the Ready column:
-
-```
-┌──────────────────────────────────────┐
-│ Plan: ENG-123 — Implement OAuth2     │
-├──────────────────────────────────────┤
-│  1│ # Authentication Design          │
-│  2│                                  │
-│  3│ ## Approach                      │
-│  4│ Use OAuth2 with PKCE...    [💬]  │
-│  5│                                  │
-│  6│ > **REVIEW**: Consider reusing   │
-│  7│ > shared-auth middleware.        │
-│  8│                                  │
-│  9│ ## Implementation Steps          │
-│ 10│ 1. Add auth middleware...        │
-├──────────────────────────────────────┤
-│ [Approve & Select Repos]  [Revise]  │
-└──────────────────────────────────────┘
-```
-
-- Markdown rendered with line numbers.
-- Click [💬] on any line to insert a `> **REVIEW**: ...` block below it.
-- "Approve" opens repo picker (from tracked repos).
-- "Revise" sends back to Planning with comments as context.
-
-#### RepoPickerSheet
-
-Shown when approving a plan. Lets user select which repos the building phase should target:
-
-```
-┌──────────────────────────────────┐
-│ Select repos for building        │
-│                                  │
-│ ☑ owner/api-server               │
-│ ☐ owner/web-client               │
-│ ☑ owner/shared-lib               │
-│                                  │
-│ [Start Building]                 │
-└──────────────────────────────────┘
-```
-
-Repos come from the tracked folders that PsyDuck already scans.
-
-### Agent Prompt Templates
-
-#### Planning Prompt
-
-```
-You are a senior software engineer. Your task is to write a detailed
-RFC/plan document for the following Linear ticket.
-
-Read the ticket context file at: {context.md path}
-
-You have access to the relevant codebase(s) cloned at:
-{list of repo clone paths}
-
-Browse the code to understand the current architecture, then write
-a comprehensive plan that covers:
-1. Problem statement (from the ticket).
-2. Proposed solution with technical approach.
-3. Files/modules that need to change.
-4. New files/modules to create.
+Browse the code, then write a plan covering:
+1. Problem statement.
+2. Proposed approach.
+3. Files/modules to change.
+4. New files to create.
 5. Testing strategy.
 6. Rollout considerations.
 7. Open questions.
 
-Write the plan as a markdown file at: {plan.md path}
-
-Be specific about code paths, function names, and module boundaries.
-Reference actual files in the codebase.
+Write the plan to: {plan.md path}
+Be specific about code paths and file references.
 ```
 
-#### Building Prompt
+### Building
 
 ```
-You are implementing a feature based on an approved plan.
+Implement a feature based on an approved plan.
 
 Plan: {plan.md path}
-Ticket context: {context.md path}
+Task context: {context.md path}
+Worktrees: {list of worktree paths}
 
-You are working in these worktrees:
-{list of worktree paths with repo names}
+For each repo:
+1. Read the plan.
+2. Make changes.
+3. Run tests.
+4. Commit with descriptive messages.
 
-Implement the plan. For each repo:
-1. Read the plan carefully.
-2. Make the code changes described.
-3. Run existing tests to verify nothing breaks.
-4. Add new tests as specified in the plan.
-5. Commit your changes with descriptive messages.
-
-When done with all changes, use `gh pr create --draft` to create
-a draft PR for each repo. Include the ticket identifier ({identifier})
-in the PR title.
+When done, push and create a draft PR for each repo via:
+gh pr create --draft --title "{identifier}: {title}" --body "..."
 ```
 
-#### Feedback Prompt
+### PR Feedback (Agent button on PR cards)
 
-```
-Your draft PR has received review feedback. Address the comments
-and fix any CI failures.
+User provides the prompt via popover. Quick actions:
+- "Address review comments" → agent runs `gh pr view --comments`, reads feedback, applies fixes, pushes.
+- "Fix CI failures" → agent runs `gh pr checks`, reads failures, fixes, pushes.
+- Custom prompt → user writes anything.
 
-PR: {pr URL}
-Worktree: {worktree path}
+## Plan Review
 
-1. Read the PR review comments: `gh pr view {number} --comments`
-2. Check CI status: `gh pr checks {number}`
-3. Address each comment and fix any failing checks.
-4. Commit and push your changes.
-```
+Sheet overlay triggered from Plan column when `planStatus == .readyForReview`.
 
-### Caching
+- Markdown rendered with line numbers.
+- Click a line to insert `> **REVIEW**: ...` blockquote below it.
+- "Approve" → repo picker (from tracked folders) → move to Build with agent/model picker.
+- "Revise" → fresh ACP session with commented plan as context.
 
-Extend `CacheService` to also cache:
-- `LinearTicket` list (same pattern as PR cache).
-- `PsyDuckTask` list (persists task state across app restarts).
+Revision prompt: "Revise this plan. Address all `> **REVIEW**:` comments inline. Remove comment blocks after addressing."
 
-```swift
-struct CachedData: Sendable, Codable {
-    let pullRequests: [PullRequest]
-    let linearTickets: [LinearTicket]    // new
-    let tasks: [PsyDuckTask]            // new
-    let lastRefresh: Date
-}
-```
+## Key Flows
 
-### Repo Cloning for Planning
+### Task: Triage → Plan → Build → Draft
 
-When a task enters Planning, `TicketContextService` also handles repo cloning:
+1. User clicks "Plan" on triage card → popover: pick agent + model (defaults from settings) → Start.
+2. `TicketContextService` exports task to `context.md`, shallow-clones relevant repos.
+3. ACP session created. Agent generates `plan.md`. UI shows real-time output.
+4. Agent finishes → card shows "Ready for Review". User reviews in sheet.
+5. If revise: fresh ACP session with comments. If approve: pick repos + agent + model → Build.
+6. `TaskWorktreeService` creates worktrees (fetch origin, branch from latest default).
+7. ACP session created. Agent codes, pushes, creates draft PRs. Card auto-advances to Draft.
 
-1. User selects which repos are relevant (or auto-detect from ticket labels/description).
-2. For each repo: `gh repo clone {fullName} {plans/ENG-123/repos/owner--repo} -- --depth=1`.
-3. Shallow clone keeps disk usage low.
-4. Clone path is passed to the agent as context.
-5. After planning completes, clones can be optionally cleaned up (or kept for revision cycles).
+### PR Feedback: Draft/Validation/InReview → Build → back
+
+1. PR card with worktree shows "Agent" button. User clicks it.
+2. Popover: pick agent + model, choose quick action or write custom prompt.
+3. Card moves to Build temporarily. `PRAgentSession` records return column.
+4. ACP session in existing worktree. Agent works, pushes.
+5. Card returns to correct PR column based on updated PR state.
+
+### Manual Task Creation
+
+"+" button in Triage column header. Title + description (markdown). Creates `BoardTask` with `linearId: nil`. Full Plan → Build → Draft flow.
 
 ## Implementation Phases
 
-### Phase 1: Foundation (~800 LOC)
+### Phase 1: Foundation (~900 LOC)
 
-New/modified files:
-- `Models.swift`: Add `LinearTicket`, `PsyDuckTask`, `TaskPhase`, `AgentType`, and related types.
-- `LinearService.swift` (new): GraphQL client for Linear API.
-- `CacheService.swift`: Extend to cache tickets and tasks.
-- `SettingsSheet.swift`: Add Linear API key field, agent picker, directory settings.
-- `BoardViewModel.swift`: Add `tasks`, `linearTickets`, fetch in refresh cycle.
-- `KanbanBoard.swift`: Add Triage column, render `LinearTicket` cards.
-- `Views/TaskCard.swift` (new): Card view for tasks/tickets.
+**New**: `LinearService.swift`, `Views/TaskCard.swift`.
+**Modified**: `Package.swift`, `Models.swift`, `BoardViewModel.swift`, `CacheService.swift`, `Views/ContentView.swift`, `Views/KanbanBoard.swift`, `Views/SettingsSheet.swift`.
 
-Deliverable: Triage column shows Linear tickets. Settings has Linear API key.
+- `BoardTask` model, `TaskPhase`, `PlanStatus`, `AgentConfig`, `AgentPreferences`.
+- `LinearService`: GraphQL fetch → `LinearTicketDTO` → upsert into `[BoardTask]`.
+- Settings: Linear API key, agent configs (command + default model per agent), default planning/building agent, permission policy, directories.
+- Cache extended for `[BoardTask]`.
+- Triage column with Linear-synced + manual tasks. Filter pills for team/project. "+" button for manual task creation.
+- Horizontal scroll on `KanbanBoard`.
 
-### Phase 2: Planning Pipeline (~1200 LOC)
+### Phase 2: ACP + Plan (~1800 LOC)
 
-New/modified files:
-- `AgentAdapter.swift` (new): Protocol + adapters for all 5 agents.
-- `AgentService.swift` (new): Process management, JSON streaming.
-- `TicketContextService.swift` (new): Ticket → markdown export + repo cloning.
-- `PlanService.swift` (new): Plan file management.
-- `Views/AgentOutputView.swift` (new): Real-time event log view.
-- `Views/TaskCard.swift`: Add planning state with agent output.
-- `BoardViewModel.swift`: Add `startPlanning()`, agent lifecycle.
+**New**: `ACPClient.swift`, `ACPTypes.swift`, `AgentRegistry.swift`, `TicketContextService.swift`, `PlanService.swift`, `Views/AgentOutputView.swift`, `Views/PlanReviewView.swift`.
+**Modified**: `Package.swift` (add `swift-json-rpc`), `BoardViewModel.swift`, `Views/TaskCard.swift`, `Views/KanbanBoard.swift`.
 
-Deliverable: "Plan" button on triage cards launches agent, shows progress, generates plan.md.
+- `ACPClient`: JSON-RPC 2.0 over stdio. `initialize` handshake, `session/new`, `session/prompt`, `session/update` parsing, `session/request_permission` handling, `session/cancel`, `terminal/*`, `fs/*`.
+- `ACPTypes`: All protocol types (`ContentBlock`, `SessionUpdate`, `ToolCall`, `PlanEntry`, `StopReason`, etc.).
+- `AgentRegistry`: discover ACP agents on PATH.
+- `TicketContextService`: task → `context.md` export + `gh repo clone --depth=1` for planning repos.
+- `PlanService`: plan file management, review comment detection.
+- Plan column: agent running state with `AgentOutputView`, steering input, auto-advance to "ready for review", plan review sheet with line numbers + blockquote comments, approve (→ Build) / revise (→ re-plan).
+- Agent/model picker popover at plan start.
 
-### Phase 3: Plan Review (~600 LOC)
+### Phase 3: Build (~1000 LOC)
 
-New/modified files:
-- `Views/PlanReviewView.swift` (new): Markdown viewer with line numbers and comment insertion.
-- `Views/RepoPickerSheet.swift` (new): Repo selection for building.
-- `Views/TaskCard.swift`: Add ready state with view/approve/revise buttons.
-- `BoardViewModel.swift`: Add `approvePlan()`, `revisePlan()`.
-- `PlanService.swift`: Add comment detection, stripping.
+**New**: `TaskWorktreeService.swift`.
+**Modified**: `BoardViewModel.swift`, `GitHubService.swift`, `Views/TaskCard.swift`, `Views/KanbanBoard.swift`.
 
-Deliverable: Ready column with plan review, inline comments, approve/revise flow.
+- `TaskWorktreeService`: `git fetch origin`, detect default branch via `gh api`, create worktrees under `~/.psyduck/worktrees/{identifier}/{repo}/`. Handle existing branches.
+- Build column: ACP session in worktrees, real-time output, steering.
+- Agent pushes + `gh pr create --draft`. Auto-advance to Draft.
+- Agent/model picker popover at build start (with repo selection).
 
-### Phase 4: Building Pipeline (~1000 LOC)
+### Phase 4: Agent on PRs (~600 LOC)
 
-New/modified files:
-- `TaskWorktreeService.swift` (new): Worktree creation under `~/.psyduck/worktrees/`.
-- `PokemonNames.swift` (new): Embedded name list + deterministic picker.
-- `Views/TaskCard.swift`: Add building state with agent output.
-- `BoardViewModel.swift`: Add building lifecycle, draft PR creation.
-- `GitHubService.swift`: Add `createDraftPR()`, `fetchPRComments()`, `fetchPRChecks()`.
+**Modified**: `Views/PRCard.swift`, `BoardViewModel.swift`, `Models.swift`.
 
-Deliverable: Approved plans → worktrees created → agent builds → draft PR created → enters Draft column.
+- "Agent" button on any PR card (Draft/Validation/InReview) that has a detected local worktree.
+- Prompt popover: agent/model picker, quick actions ("Address review comments", "Fix CI"), custom prompt field.
+- `PRAgentSession` tracks return column. Card moves to Build, agent runs, pushes, card returns.
 
-### Phase 5: Feedback Loop (~400 LOC)
+### Total: ~4300 LOC new. Final app: ~6900 LOC.
 
-New/modified files:
-- `Views/PRCard.swift`: Add "Review Feedback" button for draft PRs with associated tasks.
-- `BoardViewModel.swift`: Add `reviewFeedback()` action.
-- `GitHubService.swift`: Add `fetchReviewComments()`.
+## New SPM Dependency
 
-Deliverable: "Review Feedback" on Draft cards → agent reads comments/CI → fixes → pushes → card moves to correct column.
-
-### Estimated Total: ~4000 LOC new code
-
-Current codebase: ~2600 LOC. Final: ~6600 LOC.
+`swift-json-rpc` (or equivalent) for JSON-RPC 2.0 message framing. First and only external dependency.
 
 ## File Structure (Final)
 
 ```
 Sources/
   App.swift
-  Models.swift                    # Extended with new types
+  Models.swift                    # Extended: BoardTask, AgentConfig, etc.
   Theme.swift
-  BoardViewModel.swift            # Extended with task management
-  CacheService.swift              # Extended with task/ticket cache
-  GitHubService.swift             # Extended with PR creation/comments
+  BoardViewModel.swift            # Extended: task management, ACP lifecycle
+  CacheService.swift              # Extended: task cache
+  GitHubService.swift             # Extended: PR creation, comments, checks
   WorktreeService.swift           # Existing (PR worktree matching)
   LinearService.swift             # NEW
-  AgentService.swift              # NEW
-  AgentAdapter.swift              # NEW (protocol + 5 adapters)
+  ACPClient.swift                 # NEW
+  ACPTypes.swift                  # NEW
+  AgentRegistry.swift             # NEW
   PlanService.swift               # NEW
   TicketContextService.swift      # NEW
   TaskWorktreeService.swift       # NEW
-  PokemonNames.swift              # NEW
   Views/
-    ContentView.swift             # Extended with new column UI
-    KanbanBoard.swift             # Extended to 9 columns
-    PRCard.swift                  # Extended with feedback button
-    SettingsSheet.swift           # Extended with Linear/agent settings
+    ContentView.swift             # Extended: toolbar, filters, dialogs
+    KanbanBoard.swift             # Extended: 8 columns, horizontal scroll
+    PRCard.swift                  # Extended: Agent button
+    SettingsSheet.swift           # Extended: Linear, agents, models, dirs
     TaskCard.swift                # NEW
     AgentOutputView.swift         # NEW
     PlanReviewView.swift          # NEW
-    RepoPickerSheet.swift         # NEW
 ```
-
-## Risks and Mitigations
-
-| Risk | Mitigation |
-|------|-----------|
-| Agent CLI interfaces change | Adapter pattern isolates changes to one file per agent. |
-| Linear API rate limits | Cache aggressively. Personal API key has generous limits. |
-| Agent runs take very long | Show real-time progress. Allow kill/restart. Timeout after configurable duration. |
-| Worktree disk usage | Pokemon-named folders are easy to identify. Add cleanup in settings. |
-| Steering not supported by all agents | UI adapts per agent: show "Stop & Redirect" instead of inline steering for non-supporting agents. |
-| Plan review UX complexity | Start simple (raw markdown + blockquote comments). Improve iteratively. |
-
-## Open Questions
-
-1. Should the Triage column filter by Linear project/team, or show all tickets assigned to/created by the user?
-2. For multi-repo tasks, should the agent get all worktrees in one session, or separate sessions per repo?
-3. Should we auto-detect relevant repos from the ticket (by labels, project, mentioned repo names), or always require manual selection?
-4. What's the maximum concurrent agent count? (System resources are the bottleneck.)
-5. Should plan.md follow a specific template structure, or let the agent decide?
 
 ## References
 
-- [OpenAI Harness Engineering](https://openai.com/index/harness-engineering/) — Lessons on agent-first development, repo knowledge, feedback loops.
-- [OpenAI Symphony](https://github.com/openai/symphony) — Issue tracker as agent control plane, SPEC.md approach, workspace isolation.
-- [Symphony SPEC.md](https://github.com/openai/symphony/blob/main/SPEC.md) — Detailed orchestration specification.
-- [ACP / A2A](https://agentcommunicationprotocol.dev) — Agent interop protocol (evaluated, not adopted; headless CLI is simpler for our use case).
+- [ACP (Agent Client Protocol)](https://agentclientprotocol.com) — JSON-RPC protocol for editor↔agent communication. PsyDuck implements the client side.
+- [ACP Agents List](https://agentclientprotocol.com/get-started/agents) — 30+ compatible agents.
+- [Jockey](https://github.com/recailai/jockey) — Tauri/Rust/SolidJS ACP orchestrator (prior art for multi-agent desktop app).
+- [OpenAI Harness Engineering](https://openai.com/index/harness-engineering/) — Agent-first development patterns.
+- [OpenAI Symphony](https://github.com/openai/symphony) — Issue tracker as agent control plane, workspace isolation.

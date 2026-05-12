@@ -2,7 +2,10 @@ import SwiftUI
 
 // MARK: - Kanban Column
 
-enum KanbanColumn: String, CaseIterable, Identifiable {
+enum KanbanColumn: String, CaseIterable, Identifiable, Codable {
+    case triage = "Triage"
+    case plan = "Plan"
+    case build = "Build"
     case draft = "Draft"
     case validation = "Validation"
     case inReview = "Waiting for Review"
@@ -13,6 +16,9 @@ enum KanbanColumn: String, CaseIterable, Identifiable {
 
     var accentColor: Color {
         switch self {
+        case .triage: Theme.triageAccent
+        case .plan: Theme.planAccent
+        case .build: Theme.buildAccent
         case .draft: Theme.draftAccent
         case .inReview: Theme.inReviewAccent
         case .validation: Theme.validationAccent
@@ -23,6 +29,9 @@ enum KanbanColumn: String, CaseIterable, Identifiable {
 
     var iconName: String {
         switch self {
+        case .triage: "tray.full"
+        case .plan: "doc.text.magnifyingglass"
+        case .build: "hammer"
         case .draft: "doc.text"
         case .inReview: "eye"
         case .validation: "gearshape.2"
@@ -33,11 +42,30 @@ enum KanbanColumn: String, CaseIterable, Identifiable {
 
     var emptyMessage: String {
         switch self {
+        case .triage: "No tasks to triage"
+        case .plan: "No tasks being planned"
+        case .build: "No tasks building"
         case .draft: "No draft PRs"
         case .inReview: "No PRs waiting for review"
         case .validation: "No CI issues"
         case .approved: "No approved PRs"
         case .merged: "No recent merges"
+        }
+    }
+
+    /// Columns that display BoardTask items.
+    var isTaskColumn: Bool {
+        switch self {
+        case .triage, .plan, .build: true
+        default: false
+        }
+    }
+
+    /// Columns that display PullRequest items.
+    var isPRColumn: Bool {
+        switch self {
+        case .draft, .validation, .inReview, .approved, .merged: true
+        default: false
         }
     }
 }
@@ -282,6 +310,293 @@ enum PRAction: Identifiable {
         case .publish(let pr): "publish-\(pr.id)"
         case .updateBranch(let pr): "update-\(pr.id)"
         case .deleteWorktree(let pr, _): "delete-wt-\(pr.id)"
+        }
+    }
+}
+
+// MARK: - Board Task
+
+/// A task that flows through Triage -> Plan -> Build.
+/// Source-agnostic: Linear sync hydrates these, but manual tasks are first-class.
+struct BoardTask: Identifiable, Equatable, Sendable, Codable {
+    let id: String
+    var title: String
+    var description: String?
+    var priority: TaskPriority?
+    var labels: [String]
+    var branchName: String?
+    var url: String?
+    var comments: [TaskComment]
+    var links: [String]
+
+    // Linear sync metadata (nil for manual tasks)
+    var linearId: String?
+    var linearIdentifier: String?
+    var linearUpdatedAt: Date?
+
+    // Plan lifecycle (persisted)
+    var planStatus: PlanStatus?
+    var planPath: String?
+    var selectedRepos: [String]?
+    var worktrees: [TaskWorktree]?
+    var userContext: String?             // extra context added by the user
+
+    // Agent config per phase (chosen at start of plan/build)
+    var planningAgentId: String?
+    var planningModel: String?
+    var planningVariant: String?
+    var buildingAgentId: String?
+    var buildingModel: String?
+    var buildingVariant: String?
+
+    // Repos selected for planning context or building worktrees
+    var planningRepos: [String]?
+
+    var draftPRRefs: [PRRef]?
+    var createdAt: Date
+    var updatedAt: Date
+
+    /// Display identifier: Linear ticket ID, or short UUID for manual tasks.
+    var displayIdentifier: String {
+        if let linearIdentifier { return linearIdentifier }
+        return String(id.prefix(8))
+    }
+
+    /// Folder-safe identifier for disk paths (worktrees, plans).
+    var folderIdentifier: String {
+        if let linearIdentifier { return linearIdentifier }
+        return String(id.prefix(12))
+    }
+}
+
+enum PlanStatus: String, Codable, Sendable {
+    case readyForReview, revising
+}
+
+/// Whether an attached agent is planning or building.
+enum AgentMode: String, Codable, Sendable {
+    case planning, building
+}
+
+/// Persisted to ~/.psyduck/sessions.json so agents can be reattached on restart.
+struct PersistedAgentSession: Codable, Sendable {
+    let taskId: String
+    let mode: AgentMode
+    let agentId: String
+    let model: String?
+    let sessionId: String
+    let workingDir: String
+    let startedAt: Date
+}
+
+enum TaskPriority: Int, Codable, Sendable, CaseIterable {
+    case urgent = 1, high = 2, medium = 3, low = 4
+
+    var label: String {
+        switch self {
+        case .urgent: "Urgent"
+        case .high: "High"
+        case .medium: "Medium"
+        case .low: "Low"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .urgent: Theme.ciFailedColor
+        case .high: Theme.inReviewAccent
+        case .medium: Theme.validationAccent
+        case .low: Theme.textTertiary
+        }
+    }
+}
+
+struct TaskComment: Equatable, Sendable, Codable {
+    let author: String
+    let body: String
+    let createdAt: Date
+}
+
+struct TaskWorktree: Equatable, Sendable, Codable {
+    let repoFullName: String
+    let branch: String
+    let path: String
+}
+
+struct PRRef: Equatable, Sendable, Codable {
+    let repoFullName: String
+    let number: Int
+    let url: String
+}
+
+// MARK: - Agent Configuration
+
+struct AgentConfig: Codable, Equatable, Sendable, Identifiable {
+    let id: String
+    var displayName: String
+    var command: String
+    var args: [String]
+    var defaultModel: String?
+    var defaultVariant: String?
+    var acpNative: Bool
+    var isAvailable: Bool
+
+    // Populated at runtime by model/variant discovery
+    var availableModels: [String]?
+    var availableVariants: [String]?
+
+    func processArgs(modelOverride: String?, variantOverride: String? = nil) -> [String] {
+        var result = args
+        if let model = modelOverride ?? defaultModel {
+            switch id {
+            case "opencode", "claude-code", "codex", "gemini":
+                result += ["--model", model]
+            default: break
+            }
+        }
+        if let variant = variantOverride ?? defaultVariant {
+            switch id {
+            case "opencode":
+                result += ["--variant", variant]
+            default: break
+            }
+        }
+        return result
+    }
+
+    /// Known built-in variants per agent.
+    static let knownVariants: [String: [String]] = [
+        "opencode": ["high", "max", "low", "medium", "xhigh", "none", "minimal"],
+    ]
+
+    static let builtIn: [AgentConfig] = [
+        AgentConfig(id: "opencode", displayName: "OpenCode", command: "opencode",
+                    args: [], defaultModel: nil, defaultVariant: nil,
+                    acpNative: true, isAvailable: false),
+        AgentConfig(id: "claude-code", displayName: "Claude Code", command: "claude",
+                    args: [], defaultModel: nil, defaultVariant: nil,
+                    acpNative: false, isAvailable: false),
+        AgentConfig(id: "codex", displayName: "Codex", command: "codex",
+                    args: [], defaultModel: nil, defaultVariant: nil,
+                    acpNative: false, isAvailable: false),
+        AgentConfig(id: "gemini", displayName: "Gemini CLI", command: "gemini",
+                    args: [], defaultModel: nil, defaultVariant: nil,
+                    acpNative: true, isAvailable: false),
+        AgentConfig(id: "goose", displayName: "Goose", command: "goose",
+                    args: [], defaultModel: nil, defaultVariant: nil,
+                    acpNative: true, isAvailable: false),
+    ]
+}
+
+struct AgentPreferences: Codable, Equatable, Sendable {
+    var agents: [AgentConfig]
+    var defaultPlanningAgentId: String?
+    var defaultBuildingAgentId: String?
+    var permissionPolicy: PermissionPolicy
+
+    static let `default` = AgentPreferences(
+        agents: AgentConfig.builtIn,
+        defaultPlanningAgentId: nil,
+        defaultBuildingAgentId: nil,
+        permissionPolicy: .autoApprove
+    )
+}
+
+enum PermissionPolicy: String, Codable, Sendable, CaseIterable {
+    case autoApprove = "Auto-approve"
+    case askUser = "Ask every time"
+}
+
+// MARK: - PR Agent Session
+
+/// Tracks a PR card temporarily moved to the Build column for agent work.
+struct PRAgentSession: Codable, Equatable, Sendable {
+    let prId: String
+    let repoFullName: String
+    let worktreePath: String
+    let agentId: String
+    let model: String?
+    let prompt: String
+    let returnColumn: KanbanColumn
+}
+
+// MARK: - Linear DTO (transient, never persisted)
+
+struct LinearTicketDTO: Decodable, Sendable {
+    let id: String
+    let identifier: String
+    let title: String
+    let description: String?
+    let priority: Int?
+    let state: LinearStateName
+    let assignee: LinearUser?
+    let creator: LinearUser?
+    let labels: LinearLabelConnection
+    let url: String
+    let branchName: String?
+    let comments: LinearCommentConnection
+    let createdAt: String
+    let updatedAt: String
+
+    struct LinearStateName: Decodable, Sendable {
+        let name: String
+    }
+    struct LinearUser: Decodable, Sendable {
+        let name: String
+    }
+    struct LinearLabelConnection: Decodable, Sendable {
+        let nodes: [LinearLabel]
+    }
+    struct LinearLabel: Decodable, Sendable {
+        let name: String
+    }
+    struct LinearCommentConnection: Decodable, Sendable {
+        let nodes: [LinearComment]
+    }
+    struct LinearComment: Decodable, Sendable {
+        let body: String
+        let createdAt: String
+        let user: LinearUser?
+    }
+
+    func toBoardTask() -> BoardTask {
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let created = isoFormatter.date(from: createdAt) ?? Date()
+        let updated = isoFormatter.date(from: updatedAt) ?? Date()
+
+        return BoardTask(
+            id: UUID().uuidString,
+            title: title,
+            description: description,
+            priority: TaskPriority(rawValue: priority ?? 0),
+            labels: labels.nodes.map(\.name),
+            branchName: branchName,
+            url: url,
+            comments: comments.nodes.map { c in
+                TaskComment(
+                    author: c.user?.name ?? "Unknown",
+                    body: c.body,
+                    createdAt: isoFormatter.date(from: c.createdAt) ?? Date()
+                )
+            },
+            links: extractLinks(from: description, comments: comments.nodes.map(\.body)),
+            linearId: id,
+            linearIdentifier: identifier,
+            linearUpdatedAt: updated,
+            createdAt: created,
+            updatedAt: updated
+        )
+    }
+
+    private func extractLinks(from description: String?, comments: [String]) -> [String] {
+        let allText = ([description].compactMap { $0 } + comments).joined(separator: "\n")
+        let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        let range = NSRange(allText.startIndex..., in: allText)
+        let matches = detector?.matches(in: allText, range: range) ?? []
+        return matches.compactMap { match in
+            guard let range = Range(match.range, in: allText) else { return nil }
+            return String(allText[range])
         }
     }
 }

@@ -4,6 +4,7 @@ struct PRCard: View {
     let pr: PullRequest
     let accentColor: Color
     let availableApps: [OpenInApp]
+    var viewModel: BoardViewModel?
     let onMerge: (MergeStrategy) -> Void
     let onClose: () -> Void
     let onPublish: () -> Void
@@ -12,6 +13,9 @@ struct PRCard: View {
 
     @State private var isHovered = false
     @State private var copied = false
+    @State private var showAgentPopover = false
+    @State private var agentPrompt = ""
+    @State private var showAgentOutput = false
 
     private var isOpen: Bool {
         pr.column != .merged
@@ -188,11 +192,51 @@ struct PRCard: View {
         let showDelete = column == .merged && canDeleteWorktree
         let showActions = hasWorktree || showMerge || showPublish || showUpdate || showDelete
 
+        // Agent output (if agent is running on this PR)
+        if let vm = viewModel, let events = vm.agentOutputs[pr.id], !events.isEmpty {
+            let isAgentRunning = vm.isAgentRunning(for: pr.id)
+
+            Divider().opacity(0.1).padding(.vertical, 2)
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { showAgentOutput.toggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: showAgentOutput ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                    Text(isAgentRunning ? "Agent running..." : "Agent output")
+                        .font(.system(size: 10))
+                    if isAgentRunning {
+                        ProgressView().controlSize(.mini).scaleEffect(0.6)
+                    }
+                    Spacer()
+                }
+                .foregroundStyle(Theme.textTertiary)
+            }
+            .buttonStyle(.plain)
+            .pointingHand()
+
+            if showAgentOutput {
+                AgentOutputView(
+                    events: events,
+                    isRunning: isAgentRunning,
+                    onSteer: { msg in vm.steerAgent(id: pr.id, message: msg) },
+                    onCancel: { vm.cancelAgent(id: pr.id) }
+                )
+            }
+        }
+
         if showActions {
             Divider().opacity(0.1).padding(.vertical, 2)
 
             HStack(spacing: 6) {
                 Spacer()
+
+                // Agent button — available on any PR with a worktree in Draft/Validation/InReview
+                if hasWorktree && viewModel != nil &&
+                    (column == .draft || column == .validation || column == .inReview)
+                {
+                    agentButton
+                }
 
                 if hasWorktree {
                     openButton
@@ -317,6 +361,96 @@ struct PRCard: View {
         }
         .background(Theme.approvedAccent.opacity(0.8), in: Capsule())
         .pointingHand()
+    }
+
+    // MARK: - Agent Button
+
+    private var agentButton: some View {
+        Button { showAgentPopover = true } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 10))
+                Text("Agent")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(Theme.planAccent)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Theme.planAccent.opacity(0.1), in: Capsule())
+            .overlay(Capsule().stroke(Theme.planAccent.opacity(0.3), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+        .pointingHand()
+        .popover(isPresented: $showAgentPopover) {
+            agentPopover
+        }
+    }
+
+    private var agentPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Agent Task")
+                .font(Theme.filterFont)
+                .foregroundStyle(Theme.textPrimary)
+
+            // Quick actions
+            VStack(spacing: 4) {
+                quickActionButton("Address review comments",
+                    prompt: "Read the PR review comments with `gh pr view \(pr.number) --repo \(pr.repoFullName) --comments` and address each one. Commit and push your changes.")
+                quickActionButton("Fix CI failures",
+                    prompt: "Check CI status with `gh pr checks \(pr.number) --repo \(pr.repoFullName)` and fix any failures. Commit and push your changes.")
+            }
+
+            Divider().opacity(0.15)
+
+            // Custom prompt
+            TextField("Custom prompt...", text: $agentPrompt)
+                .textFieldStyle(.roundedBorder)
+                .font(Theme.metaFont)
+                .onSubmit { startAgent(prompt: agentPrompt) }
+
+            Button {
+                startAgent(prompt: agentPrompt)
+            } label: {
+                Text("Start")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Theme.buildAccent.opacity(0.8), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .pointingHand()
+            .disabled(agentPrompt.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+        .padding(12)
+        .frame(width: 280)
+        .background(Theme.windowBackground)
+    }
+
+    private func quickActionButton(_ title: String, prompt: String) -> some View {
+        Button {
+            startAgent(prompt: prompt)
+        } label: {
+            Text(title)
+                .font(Theme.metaFont)
+                .foregroundStyle(Theme.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Theme.cardBackground, in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .pointingHand()
+    }
+
+    private func startAgent(prompt: String) {
+        guard let vm = viewModel, !prompt.isEmpty else { return }
+        showAgentPopover = false
+        let agentId = vm.agentPreferences.defaultBuildingAgentId ?? ""
+        Task {
+            await vm.startAgentOnPR(pr: pr, agentId: agentId, model: nil, prompt: prompt)
+        }
+        agentPrompt = ""
     }
 
     // MARK: - Delete Worktree Button

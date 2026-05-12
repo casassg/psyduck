@@ -35,6 +35,8 @@ struct ContentView: View {
                 .hidden()
         }
         .task {
+            await viewModel.discoverAgentModels()
+            await viewModel.reattachSessions()
             await viewModel.refresh()
             viewModel.startAutoRefresh()
         }
@@ -43,6 +45,42 @@ struct ContentView: View {
         }
         .sheet(isPresented: $viewModel.showSettings) {
             SettingsSheet(viewModel: viewModel)
+        }
+        .sheet(isPresented: $viewModel.showNewTaskSheet) {
+            NewTaskSheet(viewModel: viewModel)
+        }
+        .sheet(item: $viewModel.selectedTask) { task in
+            TaskDetailView(
+                task: task,
+                viewModel: viewModel,
+                onDismiss: { viewModel.selectedTask = nil }
+            )
+        }
+        .sheet(item: $viewModel.showPlanReview) { task in
+            if let planText = PlanService().readPlan(for: task) {
+                PlanReviewView(
+                    task: task,
+                    planText: planText,
+                    viewModel: viewModel,
+                    onApprove: { repos, agentId, model, variant in
+                        viewModel.showPlanReview = nil
+                        Task {
+                            await viewModel.approvePlanAndBuild(
+                                task: task, repos: repos,
+                                agentId: agentId, model: model, variant: variant
+                            )
+                        }
+                    },
+                    onRevise: { updatedPlan in
+                        // Write the commented plan back to disk
+                        let path = PlanService().planPath(for: task)
+                        try? updatedPlan.write(to: path, atomically: true, encoding: .utf8)
+                        viewModel.showPlanReview = nil
+                        Task { await viewModel.revisePlan(task: task) }
+                    },
+                    onDismiss: { viewModel.showPlanReview = nil }
+                )
+            }
         }
         .alert(
             confirmationTitle,
@@ -434,6 +472,15 @@ struct ContentView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Loading text (updated for tasks)
+
+    private var loadingText: String {
+        if viewModel.pullRequests.isEmpty && viewModel.tasks.isEmpty {
+            return "Loading..."
+        }
+        return "Loading pull requests..."
     }
 
     private func errorBanner(_ message: String) -> some View {

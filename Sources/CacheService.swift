@@ -10,12 +10,14 @@ struct CacheService: Sendable {
     }()
 
     private static let prsFile = cacheDir.appendingPathComponent("pullRequests.json")
+    private static let tasksFile = cacheDir.appendingPathComponent("tasks.json")
     private static let metaFile = cacheDir.appendingPathComponent("meta.json")
 
     // MARK: - Load (synchronous — called once at init)
 
     struct CachedData: Sendable {
         let pullRequests: [PullRequest]
+        let tasks: [BoardTask]
         let lastRefresh: Date
     }
 
@@ -33,12 +35,18 @@ struct CacheService: Sendable {
             let meta = try? decoder.decode(CacheMeta.self, from: metaData)
         else { return nil }
 
-        return CachedData(pullRequests: prs, lastRefresh: meta.lastRefresh)
+        // Tasks cache is optional — older caches won't have it
+        let tasks: [BoardTask] = {
+            guard let data = try? Data(contentsOf: Self.tasksFile) else { return [] }
+            return (try? decoder.decode([BoardTask].self, from: data)) ?? []
+        }()
+
+        return CachedData(pullRequests: prs, tasks: tasks, lastRefresh: meta.lastRefresh)
     }
 
     // MARK: - Save (called after each successful refresh)
 
-    func save(pullRequests: [PullRequest], lastRefresh: Date) {
+    func save(pullRequests: [PullRequest], tasks: [BoardTask], lastRefresh: Date) {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
 
@@ -47,6 +55,8 @@ struct CacheService: Sendable {
                 at: Self.cacheDir, withIntermediateDirectories: true)
             let prsData = try encoder.encode(pullRequests)
             try prsData.write(to: Self.prsFile, options: .atomic)
+            let tasksData = try encoder.encode(tasks)
+            try tasksData.write(to: Self.tasksFile, options: .atomic)
             let metaData = try encoder.encode(CacheMeta(lastRefresh: lastRefresh))
             try metaData.write(to: Self.metaFile, options: .atomic)
         } catch {

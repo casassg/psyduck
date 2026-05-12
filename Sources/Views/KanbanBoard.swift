@@ -4,17 +4,21 @@ struct KanbanBoard: View {
     let viewModel: BoardViewModel
 
     var body: some View {
-        HStack(spacing: Theme.columnSpacing) {
-            ForEach(KanbanColumn.allCases) { column in
-                ColumnView(
-                    column: column,
-                    prs: viewModel.prs(for: column),
-                    viewModel: viewModel
-                )
+        ScrollView(.horizontal, showsIndicators: true) {
+            HStack(spacing: Theme.columnSpacing) {
+                ForEach(KanbanColumn.allCases) { column in
+                    ColumnView(
+                        column: column,
+                        prs: viewModel.prs(for: column),
+                        tasks: viewModel.tasks(for: column),
+                        viewModel: viewModel
+                    )
+                    .frame(minWidth: 280, idealWidth: 300)
+                }
             }
+            .padding(Theme.columnSpacing)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
-        .padding(Theme.columnSpacing)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 
@@ -23,7 +27,10 @@ struct KanbanBoard: View {
 struct ColumnView: View {
     let column: KanbanColumn
     let prs: [PullRequest]
+    let tasks: [BoardTask]
     let viewModel: BoardViewModel
+
+    private var itemCount: Int { prs.count + tasks.count }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,16 +39,29 @@ struct ColumnView: View {
                 .padding(.top, Theme.columnPadding)
                 .padding(.bottom, 8)
 
-            if prs.isEmpty {
+            if itemCount == 0 {
                 emptyState
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(spacing: Theme.cardSpacing) {
+                        // Task cards (Triage, Plan, Build columns)
+                        ForEach(tasks, id: \.id) { task in
+                            TaskCard(
+                                task: task,
+                                accentColor: column.accentColor,
+                                viewModel: viewModel,
+                                onDelete: { viewModel.removeTask(task) }
+                            )
+                            .transition(.opacity.combined(with: .scale(0.97)))
+                        }
+
+                        // PR cards (Draft, Validation, In Review, Approved, Merged columns)
                         ForEach(prs, id: \.id) { pr in
                             PRCard(
                                 pr: pr,
                                 accentColor: column.accentColor,
                                 availableApps: viewModel.availableApps,
+                                viewModel: viewModel,
                                 onMerge: { strategy in
                                     viewModel.confirmMerge(pr, strategy: strategy)
                                 },
@@ -58,7 +78,7 @@ struct ColumnView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxHeight: .infinity, alignment: .top)
         .background(Theme.surfaceBackground)
         .clipShape(RoundedRectangle(cornerRadius: Theme.columnCornerRadius))
     }
@@ -76,7 +96,21 @@ struct ColumnView: View {
 
             Spacer()
 
-            Text("\(prs.count)")
+            // "+" button for Triage column
+            if column == .triage {
+                Button { viewModel.showNewTaskSheet = true } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(column.accentColor)
+                        .frame(width: 20, height: 20)
+                        .background(column.accentColor.opacity(0.15), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .pointingHand()
+                .help("Create a new task")
+            }
+
+            Text("\(itemCount)")
                 .font(Theme.countBadgeFont)
                 .foregroundStyle(column.accentColor)
                 .padding(.horizontal, 8)

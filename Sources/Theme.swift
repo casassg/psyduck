@@ -18,6 +18,9 @@ enum Theme {
 
     // MARK: - Column Accent Colors
 
+    static let triageAccent = Color(hex: 0x64D2FF)
+    static let planAccent = Color(hex: 0x5856D6)
+    static let buildAccent = Color(hex: 0xFF6B35)
     static let draftAccent = Color(hex: 0x8E8E93)
     static let inReviewAccent = Color(hex: 0xFF9F0A)
     static let validationAccent = Color(hex: 0x0A84FF)
