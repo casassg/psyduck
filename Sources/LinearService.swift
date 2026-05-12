@@ -113,7 +113,7 @@ struct LinearService: Sendable {
         for dto in tickets {
             if let idx = tasks.firstIndex(where: { $0.linearId == dto.id }) {
                 let dtoUpdated = isoFormatter.date(from: dto.updatedAt) ?? Date()
-                if dtoUpdated > (tasks[idx].linearUpdatedAt ?? .distantPast) {
+                if dtoUpdated > (tasks[idx].lastSyncedAt ?? .distantPast) {
                     tasks[idx].title = dto.title
                     tasks[idx].description = dto.description
                     tasks[idx].priority = TaskPriority(rawValue: dto.priority ?? 0)
@@ -127,8 +127,8 @@ struct LinearService: Sendable {
                             createdAt: isoFormatter.date(from: c.createdAt) ?? Date()
                         )
                     }
-                    tasks[idx].linearUpdatedAt = dtoUpdated
-                    tasks[idx].updatedAt = Date()
+                    tasks[idx].lastSyncedAt = dtoUpdated
+                    tasks[idx].updatedAt = dtoUpdated
                 }
             } else {
                 tasks.append(dto.toBoardTask())

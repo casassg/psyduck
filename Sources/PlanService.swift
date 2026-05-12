@@ -46,6 +46,18 @@ struct PlanService: Sendable {
         return lines.joined(separator: "\n")
     }
 
+    /// Copy the plan file from one task's directory to another's.
+    func copyPlan(from source: BoardTask, to destination: BoardTask) throws {
+        let srcPath = planPath(for: source)
+        let dstPath = planPath(for: destination)
+        let fm = FileManager.default
+        try fm.createDirectory(at: dstPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fm.fileExists(atPath: dstPath.path) {
+            try fm.removeItem(at: dstPath)
+        }
+        try fm.copyItem(at: srcPath, to: dstPath)
+    }
+
     /// Build the planning prompt for a task.
     func buildPlanningPrompt(task: BoardTask, contextPath: URL, repoClonePaths: [URL]) -> String {
         var prompt = """

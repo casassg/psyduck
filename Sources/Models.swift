@@ -332,7 +332,7 @@ struct BoardTask: Identifiable, Equatable, Sendable, Codable {
     // Linear sync metadata (nil for manual tasks)
     var linearId: String?
     var linearIdentifier: String?
-    var linearUpdatedAt: Date?
+    var lastSyncedAt: Date?
 
     // Plan lifecycle (persisted)
     var planStatus: PlanStatus?
@@ -351,6 +351,12 @@ struct BoardTask: Identifiable, Equatable, Sendable, Codable {
 
     // Repos selected for planning context or building worktrees
     var planningRepos: [String]?
+
+    // Build split: when a multi-repo plan is approved, the original task is marked
+    // splitIntoBuilds = true (hidden from board) and independent per-repo build tasks
+    // are created with originTaskId pointing back here.
+    var splitIntoBuilds: Bool?
+    var originTaskId: String?
 
     var draftPRRefs: [PRRef]?
     var createdAt: Date
@@ -583,7 +589,7 @@ struct LinearTicketDTO: Decodable, Sendable {
             links: extractLinks(from: description, comments: comments.nodes.map(\.body)),
             linearId: id,
             linearIdentifier: identifier,
-            linearUpdatedAt: updated,
+            lastSyncedAt: updated,
             createdAt: created,
             updatedAt: updated
         )

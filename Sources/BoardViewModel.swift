@@ -142,6 +142,8 @@ final class BoardViewModel {
 
     /// Column is derived from agent attachment + plan status — not stored on the task.
     func column(for task: BoardTask) -> KanbanColumn? {
+        // Split into per-repo build tasks → hidden (children handle it)
+        if task.splitIntoBuilds == true { return nil }
         // Active building agent → Build
         if activeAgentSessions[task.id] == .building { return .build }
         // Active planning agent or plan ready for review → Plan
@@ -378,118 +380,160 @@ final class BoardViewModel {
         }
     }
 
-    /// Approve a plan and start building.
+    /// Approve a plan and start building — creates one independent task per repo.
     func approvePlanAndBuild(task: BoardTask, repos: [String], agentId: String, model: String?, variant: String?) async {
         guard let idx = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+
+        // Mark the original task as split so it hides from the board.
         tasks[idx].planStatus = nil
+        tasks[idx].splitIntoBuilds = true
         tasks[idx].selectedRepos = repos
-        tasks[idx].buildingAgentId = agentId
-        tasks[idx].buildingModel = model
-        tasks[idx].buildingVariant = variant
         tasks[idx].updatedAt = Date()
-        agentOutputs[task.id] = []
-        activeAgentSessions[task.id] = .building
         saveTasks()
-        persistSessions()
 
-        let taskId = task.id
-        let currentTask = tasks[idx]
+        let originalTask = tasks[idx]
 
-        agentTasks[taskId] = Task {
+        guard let agentConfig = agentPreferences.agents.first(where: { $0.id == agentId }) else {
+            appendEvent(taskId: task.id, AgentOutputEvent(text: "Agent not configured", kind: .error))
+            return
+        }
+
+        // Create one build task per selected repo and launch agents in parallel.
+        for repo in repos {
+            let repoShortName = repo.split(separator: "/").last.map(String.init) ?? repo
+
+            // Create the per-repo build task.
+            let buildTask = BoardTask(
+                id: UUID().uuidString,
+                title: "\(originalTask.displayIdentifier): \(originalTask.title) [\(repoShortName)]",
+                description: originalTask.description,
+                priority: originalTask.priority,
+                labels: originalTask.labels,
+                branchName: originalTask.branchName,
+                url: originalTask.url,
+                comments: [],
+                links: originalTask.links,
+                linearId: originalTask.linearId,
+                linearIdentifier: originalTask.linearIdentifier,
+                lastSyncedAt: originalTask.lastSyncedAt,
+                selectedRepos: [repo],
+                userContext: originalTask.userContext,
+                buildingAgentId: agentId,
+                buildingModel: model,
+                buildingVariant: variant,
+                originTaskId: originalTask.id,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+
+            tasks.append(buildTask)
+            agentOutputs[buildTask.id] = []
+            activeAgentSessions[buildTask.id] = .building
+            saveTasks()
+            persistSessions()
+
+            // Copy the plan file for this build task.
             do {
-                // Create worktrees
-                let repoTuples = repos.compactMap { fullName -> (String, URL)? in
-                    guard let localPath = findLocalRepo(fullName) else { return nil }
-                    return (fullName, localPath)
-                }
+                try planService.copyPlan(from: originalTask, to: buildTask)
+            } catch {
+                appendEvent(taskId: buildTask.id, AgentOutputEvent(text: "Failed to copy plan: \(error.localizedDescription)", kind: .error))
+                continue
+            }
 
-                appendEvent(taskId: taskId, AgentOutputEvent(text: "Creating worktrees...", kind: .execute))
-                let worktrees = try await taskWorktreeService.createWorktrees(
-                    for: currentTask, repos: repoTuples)
+            let buildTaskId = buildTask.id
+            let buildTaskSnapshot = buildTask
 
-                await MainActor.run {
-                    if let idx = self.tasks.firstIndex(where: { $0.id == taskId }) {
-                        self.tasks[idx].worktrees = worktrees
+            agentTasks[buildTaskId] = Task {
+                do {
+                    // Create worktree for this single repo.
+                    guard let localPath = findLocalRepo(repo) else {
+                        await MainActor.run {
+                            self.appendEvent(taskId: buildTaskId, AgentOutputEvent(text: "Local repo not found for \(repo)", kind: .error))
+                            self.activeAgentSessions.removeValue(forKey: buildTaskId)
+                            self.persistSessions()
+                        }
+                        return
                     }
-                }
 
-                guard let firstWorktree = worktrees.first else {
-                    appendEvent(taskId: taskId, AgentOutputEvent(text: "No worktrees created", kind: .error))
-                    return
-                }
+                    appendEvent(taskId: buildTaskId, AgentOutputEvent(text: "Creating worktree for \(repo)...", kind: .execute))
+                    let worktrees = try await taskWorktreeService.createWorktrees(
+                        for: buildTaskSnapshot, repos: [(repo, localPath)])
 
-                // Build prompt
-                let planPath = planService.planPath(for: currentTask)
-                let contextPath = try contextService.exportContext(for: currentTask)
-                var prompt = """
-                    Implement a feature based on an approved plan.
+                    guard let worktree = worktrees.first else {
+                        await MainActor.run {
+                            self.appendEvent(taskId: buildTaskId, AgentOutputEvent(text: "No worktree created for \(repo)", kind: .error))
+                            self.activeAgentSessions.removeValue(forKey: buildTaskId)
+                            self.persistSessions()
+                        }
+                        return
+                    }
 
-                    Plan: \(planPath.path)
-                    Task context: \(contextPath.appendingPathComponent("context.md").path)
-
-                    You are working in these worktrees:
-
-                    """
-                for wt in worktrees {
-                    prompt += "- \(wt.repoFullName): \(wt.path)\n"
-                }
-                prompt += """
-
-                    For each repo:
-                    1. Read the plan.
-                    2. Make changes.
-                    3. Run tests.
-                    4. Commit with descriptive messages.
-
-                    When done, push and create a draft PR for each repo via:
-                    gh pr create --draft --title "\(currentTask.displayIdentifier): \(currentTask.title)"
-                    """
-
-                guard let agentConfig = agentPreferences.agents.first(where: { $0.id == agentId }) else {
-                    appendEvent(taskId: taskId, AgentOutputEvent(text: "Agent not configured", kind: .error))
-                    return
-                }
-
-                let buildVariant = currentTask.buildingVariant
-                let args = agentConfig.processArgs(modelOverride: model, variantOverride: buildVariant)
-                let client = try await ACPClient.connect(command: agentConfig.command, args: args)
-                acpClients[taskId] = client
-
-                client.onUpdate = { [weak self] update in
-                    Task { @MainActor in
-                        for event in AgentOutputEvent.from(update: update) {
-                            self?.appendEvent(taskId: taskId, event)
+                    await MainActor.run {
+                        if let idx = self.tasks.firstIndex(where: { $0.id == buildTaskId }) {
+                            self.tasks[idx].worktrees = [worktree]
                         }
                     }
-                }
 
-                let sessionId = try await client.createSession(
-                    cwd: URL(fileURLWithPath: firstWorktree.path))
-                let _ = try await client.prompt(sessionId: sessionId, content: [.text(prompt)])
+                    // Build prompt scoped to this single repo.
+                    let planPath = planService.planPath(for: buildTaskSnapshot)
+                    let contextPath = try contextService.exportContext(for: buildTaskSnapshot)
+                    let prompt = """
+                        Implement a feature based on an approved plan.
 
-                // Agent finished — detach. Task hides from board once PR appears after refresh.
-                await MainActor.run {
-                    if let idx = self.tasks.firstIndex(where: { $0.id == taskId }) {
-                        self.tasks[idx].updatedAt = Date()
+                        Plan: \(planPath.path)
+                        Task context: \(contextPath.appendingPathComponent("context.md").path)
+
+                        You are working in: \(worktree.path) (repo: \(repo))
+
+                        Steps:
+                        1. Read the plan.
+                        2. Make changes in this repo only.
+                        3. Run tests.
+                        4. Commit with descriptive messages.
+
+                        When done, push and create a draft PR via:
+                        gh pr create --draft --title "\(originalTask.displayIdentifier): \(originalTask.title)"
+                        """
+
+                    let args = agentConfig.processArgs(modelOverride: model, variantOverride: variant)
+                    let client = try await ACPClient.connect(command: agentConfig.command, args: args)
+                    await MainActor.run { self.acpClients[buildTaskId] = client }
+
+                    client.onUpdate = { [weak self] update in
+                        Task { @MainActor in
+                            for event in AgentOutputEvent.from(update: update) {
+                                self?.appendEvent(taskId: buildTaskId, event)
+                            }
+                        }
                     }
-                    self.appendEvent(taskId: taskId, AgentOutputEvent(text: "Build complete — draft PR created", kind: .completed))
-                    self.activeAgentSessions.removeValue(forKey: taskId)
-                    self.persistSessions()
-                    self.saveTasks()
-                }
 
-                try? await client.closeSession(id: sessionId)
-                client.kill()
-                acpClients.removeValue(forKey: taskId)
+                    let sessionId = try await client.createSession(
+                        cwd: URL(fileURLWithPath: worktree.path))
+                    let _ = try await client.prompt(sessionId: sessionId, content: [.text(prompt)])
 
-                // Refresh to pick up the new draft PR
-                await refresh()
+                    // Agent finished.
+                    await MainActor.run {
+                        if let idx = self.tasks.firstIndex(where: { $0.id == buildTaskId }) {
+                            self.tasks[idx].updatedAt = Date()
+                        }
+                        self.appendEvent(taskId: buildTaskId, AgentOutputEvent(text: "Build complete — draft PR created", kind: .completed))
+                        self.activeAgentSessions.removeValue(forKey: buildTaskId)
+                        self.persistSessions()
+                        self.saveTasks()
+                    }
 
-            } catch {
-                await MainActor.run {
-                    self.appendEvent(taskId: taskId, AgentOutputEvent(text: "Error: \(error.localizedDescription)", kind: .error))
-                    self.activeAgentSessions.removeValue(forKey: taskId)
-                    self.persistSessions()
+                    try? await client.closeSession(id: sessionId)
+                    client.kill()
+                    acpClients.removeValue(forKey: buildTaskId)
+
+                    await refresh()
+
+                } catch {
+                    await MainActor.run {
+                        self.appendEvent(taskId: buildTaskId, AgentOutputEvent(text: "Error: \(error.localizedDescription)", kind: .error))
+                        self.activeAgentSessions.removeValue(forKey: buildTaskId)
+                        self.persistSessions()
+                    }
                 }
             }
         }

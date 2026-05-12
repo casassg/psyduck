@@ -337,6 +337,7 @@ struct AgentPickerPopover: View {
     @State private var selectedModel: String = ""
     @State private var selectedVariant: String = ""
     @State private var selectedRepos: Set<String> = []
+    @State private var repoSearchText: String = ""
 
     private var currentAgent: AgentConfig? {
         viewModel.agentPreferences.agents.first { $0.id == selectedAgentId }
@@ -404,18 +405,49 @@ struct AgentPickerPopover: View {
                 }
             }
 
-            // Repo selection — filtered by current org/repo pills
+            // Repo selection — all tracked repos with search
             if showRepos {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Repos")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(Theme.textTertiary)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 4) {
+                        Text("Repos")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(Theme.textTertiary)
+                        Spacer()
+                        if !selectedRepos.isEmpty {
+                            Text("\(selectedRepos.count) selected")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Theme.approvedAccent)
+                        }
+                    }
 
-                    let repos = viewModel.filteredRepoNames()
-                    if repos.isEmpty {
+                    // Search field
+                    HStack(spacing: 5) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.textTertiary)
+                        TextField("Search repos...", text: $repoSearchText)
+                            .textFieldStyle(.plain)
+                            .font(Theme.metaMonoFont)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Theme.surfaceBackground, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.cardBorder, lineWidth: 0.5))
+
+                    let allRepos = viewModel.trackedRepoNames()
+                    let repos = repoSearchText.isEmpty ? allRepos : allRepos.filter {
+                        $0.localizedCaseInsensitiveContains(repoSearchText)
+                    }
+
+                    if allRepos.isEmpty {
                         Text("No repos found. Add tracked folders in Settings.")
                             .font(Theme.metaFont)
                             .foregroundStyle(Theme.textTertiary)
+                    } else if repos.isEmpty {
+                        Text("No repos matching \"\(repoSearchText)\"")
+                            .font(Theme.metaFont)
+                            .foregroundStyle(Theme.textTertiary)
+                            .padding(.vertical, 4)
                     } else {
                         ScrollView {
                             VStack(spacing: 2) {
@@ -449,7 +481,7 @@ struct AgentPickerPopover: View {
                                 }
                             }
                         }
-                        .frame(maxHeight: 120)
+                        .frame(maxHeight: 240)
                     }
                 }
             }
@@ -470,18 +502,14 @@ struct AgentPickerPopover: View {
             .pointingHand()
             .disabled(selectedAgentId.isEmpty)
         }
-        .padding(12)
-        .frame(width: 280)
+        .padding(14)
+        .frame(width: 420)
         .background(Theme.windowBackground)
         .onAppear {
             selectedAgentId = defaultAgentId ?? viewModel.agentPreferences.agents.first(where: \.isAvailable)?.id ?? ""
             if let agent = viewModel.agentPreferences.agents.first(where: { $0.id == selectedAgentId }) {
                 selectedModel = agent.defaultModel ?? ""
                 selectedVariant = agent.defaultVariant ?? ""
-            }
-            // Pre-select all filtered repos
-            if showRepos {
-                selectedRepos = Set(viewModel.filteredRepoNames())
             }
         }
     }
